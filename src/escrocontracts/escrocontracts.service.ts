@@ -14,7 +14,6 @@ import { EscrowContract, EscrowStatus } from './entities/escrocontract.entity';
 import { CreateEscrowContractDto } from './dto/create-escrocontract.dto';
 import { User } from '../user/entities/user.entity';
 import { SmsService } from '../sms/sms.service';
-// escrocontracts.service.ts — yuqori qismiga import qo'shing
 import { InjectRedis } from '@nestjs-modules/ioredis';
 import Redis from 'ioredis';
 
@@ -35,7 +34,7 @@ interface InvitePayload {
 }
 
 @Injectable()
-export class EscrowContractService {
+export class EscrocontractsService {
   constructor(
     @InjectRepository(EscrowContract)
     private readonly contractRepo: Repository<EscrowContract>,
@@ -65,6 +64,7 @@ export class EscrowContractService {
       status: EscrowStatus.PENDING,
       creator: { id: user.userId } as any,
     });
+    
 
     const saved = await this.contractRepo.save(contract);
 
@@ -127,31 +127,36 @@ private async sendInviteSms(contractId: number, phone: string): Promise<string> 
 
     return { action: 'view', contractId: payload.contractId, token };
   }
+async getContractByToken(token: string, user: JwtUser): Promise<EscrowContract> {
+  const raw = await this.redis.get(`contract_invite:${token}`);
 
-  // ─── 3. Token orqali shartnomani ochish ───────────────────────────────────
-  async getContractByToken(token: string, user: JwtUser): Promise<EscrowContract> {
-    const raw = await this.redis.get(`contract_invite:${token}`);
-
-    if (!raw) {
-      throw new BadRequestException("Link muddati o'tgan yoki noto'g'ri");
-    }
-
-    const payload: InvitePayload = JSON.parse(raw);
-
-    if (payload.phone !== user.phoneNumber) {
-      throw new ForbiddenException('Bu link sizga tegishli emas');
-    }
-
-    const contract = await this.contractRepo.findOne({
-      where: { id: payload.contractId },
-      relations: ['creator'],
-    });
-
-    if (!contract) throw new NotFoundException('Shartnoma topilmadi');
-
-    return contract;
+  if (!raw) {
+    throw new BadRequestException("Link muddati o'tgan yoki noto'g'ri");
   }
 
+  const payload: InvitePayload = JSON.parse(raw);
+
+  // ← shu qatorlarni qo'shing
+  console.log('Token phone :', payload.phone);
+  console.log('JWT phone   :', user.phoneNumber);
+  console.log('Teng?       :', payload.phone === user.phoneNumber);
+
+  const isAdmin    = user.role === 'admin';
+  const isExecutor = payload.phone.replace('+', '') === user.phoneNumber.replace('+', '');
+
+  if (!isExecutor && !isAdmin) {
+    throw new ForbiddenException('Bu link sizga tegishli emas');
+  }
+
+  const contract = await this.contractRepo.findOne({
+    where: { id: payload.contractId },
+    relations: ['creator'],
+  });
+
+  if (!contract) throw new NotFoundException('Shartnoma topilmadi');
+
+  return contract;
+}
   // ─── 4. Foydalanuvchi shartnomalar ro'yxati ───────────────────────────────
   async findAllByUser(user: JwtUser): Promise<EscrowContract[]> {
     return this.contractRepo.find({

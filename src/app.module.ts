@@ -7,6 +7,10 @@ import { UserModule } from './user/user.module';
 import dotenv, { config } from "dotenv";
 import { RedisModule } from '@nestjs-modules/ioredis';
 import { EscrocontractsModule } from './escrocontracts/escrocontracts.module';
+import { AuditLogModule } from './audit-log/audit-log.module';
+import { APP_INTERCEPTOR } from '@nestjs/core';
+import { AuditInterceptor } from './audit-log/audit-log.interceptor';
+import { PaymentModule } from './payment/payment.module';
 
 dotenv.config();
 
@@ -31,10 +35,18 @@ dotenv.config();
     }),
     UserModule,
     EscrocontractsModule,
-  
+
+    AuditLogModule,
+
+    PaymentModule,
+
+
 
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [AppService, {
+      provide: APP_INTERCEPTOR,
+      useClass: AuditInterceptor,
+    },],
 })
 export class AppModule {}

@@ -1,4 +1,4 @@
-// src/escrocontracts/entities/escrocontract.entity.ts
+
 import {
   Entity, PrimaryGeneratedColumn, Column,
   CreateDateColumn, ManyToOne,

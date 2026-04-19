@@ -1,4 +1,4 @@
-// src/escrocontracts/escrocontracts.controller.ts
+
 import {
   Controller, Get, Post, Body, Patch, Param,
   UseGuards, Req, UseInterceptors, UploadedFile,
@@ -8,10 +8,11 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
 
-import { EscrowContractService } from './escrocontracts.service';
+import { EscrocontractsService } from './escrocontracts.service';
 import { CreateEscrowContractDto } from './dto/create-escrocontract.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { EscrowStatus } from './entities/escrocontract.entity';
+import { AuditInterceptor } from '../audit-log/audit-log.interceptor';
 
 const contractFileInterceptor = FileInterceptor('file', {
   storage: diskStorage({
@@ -32,10 +33,10 @@ const contractFileInterceptor = FileInterceptor('file', {
   },
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
 });
-
+@UseInterceptors(AuditInterceptor)
 @Controller('escro-contract')
 export class EscrowContractController {
-  constructor(private readonly escrowService: EscrowContractService) {}
+  constructor(private readonly escrowService: EscrocontractsService) {}
 
   // 1. Shartnoma yaratish (JWT kerak)
   @Post()

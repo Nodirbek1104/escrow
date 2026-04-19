@@ -213,7 +213,7 @@ async verifyOtp(dto: VerifyOtpDto) {
   // --- BU YERGA ROLE QO'SHILDI ---
   const payload = { 
     sub: user.id, 
-    phone: user.phoneNumber, 
+    phoneNumber: user.phoneNumber, 
     role: user.role // AdminGuard shu yerdan o'qiydi
   };
 
