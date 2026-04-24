@@ -1,111 +1,115 @@
-
 import {
-  Controller, Get, Post, Body, Patch, Param,
-  UseGuards, Req, UseInterceptors, UploadedFile,
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Param,
+  Delete,
+  UseGuards,
+  Req,
+  UploadedFile,
+  UseInterceptors,
   ParseIntPipe,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { EscrocontractsService } from './escrocontracts.service';
+import { CreateEscrowContractDto } from './dto/create-escrocontract.dto';
+import { EscrowStatus } from './entities/escrocontract.entity';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard'; // O'zingizning Guard manzilingiz
 import { diskStorage } from 'multer';
 import { extname } from 'path';
 
-import { EscrocontractsService } from './escrocontracts.service';
-import { CreateEscrowContractDto } from './dto/create-escrocontract.dto';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import { EscrowStatus } from './entities/escrocontract.entity';
-import { AuditInterceptor } from '../audit-log/audit-log.interceptor';
-
-const contractFileInterceptor = FileInterceptor('file', {
-  storage: diskStorage({
-    destination: './uploads/contracts',
-    filename: (req, file, cb) => {
-      const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-      cb(null, `contract-${unique}${extname(file.originalname)}`);
-    },
-  }),
-  fileFilter: (req, file, cb) => {
-    const allowed = ['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png'];
-    const ext = extname(file.originalname).toLowerCase();
-    if (allowed.includes(ext)) {
-      cb(null, true);
-    } else {
-      cb(new Error(`Ruxsat etilmagan fayl turi: ${ext}`), false);
-    }
-  },
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
-});
-@UseInterceptors(AuditInterceptor)
-@Controller('escro-contract')
-export class EscrowContractController {
+@Controller('escrow-contracts')
+@UseGuards(JwtAuthGuard) // Barcha endpointlar uchun login talab qilinadi
+export class EscrocontractsController {
   constructor(private readonly escrowService: EscrocontractsService) {}
 
-  // 1. Shartnoma yaratish (JWT kerak)
+  // 1. Shartnoma yaratish (Fayl bilan)
   @Post()
-  @UseGuards(JwtAuthGuard)
-  @UseInterceptors(contractFileInterceptor)
-  create(
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: diskStorage({
+        destination: './uploads/contracts',
+        filename: (req, file, cb) => {
+          const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+          cb(null, `${uniqueSuffix}${extname(file.originalname)}`);
+        },
+      }),
+    }),
+  )
+  async create(
     @Body() dto: CreateEscrowContractDto,
-    @Req() req,
+    @Req() req: any,
     @UploadedFile() file?: Express.Multer.File,
   ) {
     return this.escrowService.create(dto, req.user, file?.path);
   }
 
-  // 2. Invite token tekshirish (JWT SHART EMAS)
-  @Get('invite/:token')
-  resolveInvite(@Param('token') token: string) {
-    return this.escrowService.resolveInvite(token);
-  }
-
-  // 3. Token orqali shartnomani ochish (JWT kerak)
-  @Get('invite/:token/contract')
-  @UseGuards(JwtAuthGuard)
-  getContractByToken(@Param('token') token: string, @Req() req) {
-    return this.escrowService.getContractByToken(token, req.user);
-  }
-
-  // 4. O'zining shartnomalar ro'yxati
-  @Get('my-documents')
-  @UseGuards(JwtAuthGuard)
-  findAll(@Req() req) {
+  // 2. Foydalanuvchining barcha shartnomalari
+  @Get('my')
+  async findAll(@Req() req: any) {
     return this.escrowService.findAllByUser(req.user);
   }
 
-  // 5. Batafsil ko'rish
+  // 3. Invite Linkni tekshirish (Ochiq endpoint bo'lishi mumkin, lekin Guard bor)
+  @Get('invite/:token')
+  async resolveInvite(@Param('token') token: string) {
+    return this.escrowService.resolveInvite(token);
+  }
+
+  // 4. Invite orqali shartnoma ma'lumotlarini olish
+  @Get('invite/:token/details')
+  async getByToken(@Param('token') token: string, @Req() req: any) {
+    return this.escrowService.getContractByToken(token, req.user);
+  }
+
+  // 5. Bittasini ko'rish
   @Get(':id')
-  @UseGuards(JwtAuthGuard)
-  findOne(@Param('id', ParseIntPipe) id: number, @Req() req) {
+  async findOne(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
     return this.escrowService.findOne(id, req.user);
   }
 
-  // 6. Status yangilash
+  // 6. Statusni yangilash (ACCEPTED, REJECTED, REVISION, COMPLETED)
   @Patch(':id/status')
-  @UseGuards(JwtAuthGuard)
-  updateStatus(
+  async updateStatus(
     @Param('id', ParseIntPipe) id: number,
     @Body('status') status: EscrowStatus,
     @Body('reason') reason: string,
-    @Req() req,
+    @Body('cardId') cardId: string, // ACCEPTED holati uchun kerak
+    @Req() req: any,
   ) {
-    return this.escrowService.updateStatus(id, status, req.user, reason);
+    return this.escrowService.updateStatus(id, status, req.user, {
+      reason,
+      cardId,
+    });
   }
 
-  // 7. Bekor qilish
-  @Patch(':id/cancel')
-  @UseGuards(JwtAuthGuard)
-  cancel(@Param('id', ParseIntPipe) id: number, @Req() req) {
-    return this.escrowService.cancel(id, req.user);
+  // 7. Pulni muzlatish (Xaridor to'lov qilganda)
+  @Post(':id/hold-payment')
+  async holdPayment(
+    @Param('id', ParseIntPipe) id: number,
+    @Body('cardId') cardId: string,
+    @Req() req: any,
+  ) {
+    return this.escrowService.holdContractPayment(id, req.user, cardId);
   }
 
   // 8. Tahrirlash
   @Patch(':id')
-  @UseGuards(JwtAuthGuard)
-  @UseInterceptors(contractFileInterceptor)
-  update(
+  @UseInterceptors(FileInterceptor('file'))
+  async update(
     @Param('id', ParseIntPipe) id: number,
-    @Body() dto: Partial<CreateEscrowContractDto>,
-    @Req() req,
+    @Body() dto: any,
+    @Req() req: any,
     @UploadedFile() file?: Express.Multer.File,
   ) {
     return this.escrowService.update(id, dto, req.user, file?.path);
+  }
+
+  // 9. Bekor qilish
+  @Delete(':id/cancel')
+  async cancel(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+    return this.escrowService.cancel(id, req.user);
   }
 }

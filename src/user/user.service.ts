@@ -4,7 +4,8 @@ import {
   UnauthorizedException, 
   NotFoundException, 
   InternalServerErrorException, 
-  ForbiddenException
+  ForbiddenException,
+  Logger
   } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -30,6 +31,7 @@ dotenv.config();
 
 @Injectable()
 export class UserService {
+  private readonly logger = new Logger(UserService.name);
   constructor(
     @InjectRedis() private readonly redis: Redis,
     @InjectRepository(User)
@@ -109,30 +111,37 @@ private async sendSmsViaEskiz(phoneNumber: string, message: string) {
     console.error('Eskiz SMS xatosi:', error.response?.data || error.message);
   };
 };
-
 async sendOtp(dto: SendOtpDto) {
+  // 1. Avval foydalanuvchi borligini tekshiramiz (Vaqtni tejash uchun)
+  const existingUser = await this.userRepository.findOneBy({ phoneNumber: dto.phoneNumber });
+  if (existingUser) {
+    throw new BadRequestException("Bu telefon raqami allaqachon ro'yxatdan o'tgan!");
+  }
+
   const otp = Math.floor(1000 + Math.random() * 9000).toString();
-  
-  // 1. Kodni Redisda saqlash (5 daqiqa)
-  await this.redis.set(`otp:${dto.phoneNumber}`, otp, 'EX', 300);
 
-  // 2. Eskiz orqali telefoningizga test SMS yuborish
-  await this.sendSmsViaEskiz(dto.phoneNumber, `Bu Eskiz dan test`);
-
-  // 3. Kodni terminalga chiqarish (Mana shu qator muhim)
+  // 2. Kodni terminalga darhol chiqarish (Hamma narsadan oldin)
   console.log('------------------------------------------');
   console.log(`[REGISTRATSIYA] Tel: ${dto.phoneNumber}`);
   console.log(`[KOD]: ${otp}`);
   console.log('------------------------------------------');
-  const existingUser = await this.userRepository.findOneBy({ phoneNumber: dto.phoneNumber });
-if(existingUser){
-  throw new BadRequestException("Bu telefon raqami allaqachon ro'yxatdan o'tgan!")
-}
+
+  // 3. Kodni Redisda saqlash
+  await this.redis.set(`otp:${dto.phoneNumber}`, otp, 'EX', 300);
+
+  // 4. SMS yuborish (try-catch ichida, xato bo'lsa ham terminalda kod qolaveradi)
+  try {
+    await this.sendSmsViaEskiz(dto.phoneNumber, `Tasdiqlash kodi: ${otp}`);
+  } catch (error) {
+    this.logger.error(`SMS yuborishda xatolik: ${error}`);
+    // SMS ketmasa ham test davom etaveradi
+  }
+
   return { 
     message: "Tasdiqlash kodi yuborildi.",
     hint: "Test rejimidasiz, kodni terminaldan oling" 
   };
-};
+}
 async forgotPassword(dto: ForgotPasswordDto) {
   const user = await this.userRepository.findOneBy({ phoneNumber: dto.phoneNumber });
   if (!user) throw new NotFoundException("Foydalanuvchi topilmadi");

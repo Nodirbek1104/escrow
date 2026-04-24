@@ -1,8 +1,7 @@
-
 import { Entity, PrimaryGeneratedColumn, Column, OneToMany } from "typeorm";
 import { EscrowContract } from "../../escrocontracts/entities/escrocontract.entity";
+import { Card } from "../../payment/entities/payment.entity"; // Card entityni import qiling
 
-// Enumni klassdan tashqarida (tepada) saqlash yaxshi amaliyot
 export enum UserRole {
   USER = 'user',
   ADMIN = 'admin',
@@ -26,7 +25,6 @@ export class User {
   @Column({ default: false })
   isVerified!: boolean;
 
-  // --- MUHIM: Role ustuni shu yerda bo'lishi kerak ---
   @Column({
     type: "enum",
     enum: UserRole,
@@ -40,12 +38,15 @@ export class User {
   @Column({ type: "timestamp", nullable: true })
   otpExpires?: Date | null;
 
+  // --- RELATIONLAR ---
+  
   @OneToMany(() => EscrowContract, (contract) => contract.creator)
   createdContracts!: EscrowContract[];
 
+  // Kartalar bilan bog'liqlik
+  @OneToMany(() => Card, (card) => card.user)
+  cards!: Card[];
 
-
-  // Vaqtni kuzatish uchun bu ustunlarni qo'shish tavsiya etiladi
   @Column({ type: 'timestamp', default: () => 'CURRENT_TIMESTAMP' })
   createdAt!: Date;
 }
