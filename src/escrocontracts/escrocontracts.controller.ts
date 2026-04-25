@@ -11,21 +11,22 @@ import {
   UploadedFile,
   UseInterceptors,
   ParseIntPipe,
+  BadRequestException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { EscrocontractsService } from './escrocontracts.service';
 import { CreateEscrowContractDto } from './dto/create-escrocontract.dto';
 import { EscrowStatus } from './entities/escrocontract.entity';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard'; // O'zingizning Guard manzilingiz
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
 
 @Controller('escrow-contracts')
-@UseGuards(JwtAuthGuard) // Barcha endpointlar uchun login talab qilinadi
+@UseGuards(JwtAuthGuard) // Barcha so'rovlar uchun JWT token talab qilinadi
 export class EscrocontractsController {
   constructor(private readonly escrowService: EscrocontractsService) {}
 
-  // 1. Shartnoma yaratish (Fayl bilan)
+  // ─── 1. SHARTNOMA YARATISH (IJROCHI) ───────────────────────────────────────
   @Post()
   @UseInterceptors(
     FileInterceptor('file', {
@@ -43,60 +44,52 @@ export class EscrocontractsController {
     @Req() req: any,
     @UploadedFile() file?: Express.Multer.File,
   ) {
+    // Servisga ma'lumotlarni va fayl yo'lini uzatamiz
     return this.escrowService.create(dto, req.user, file?.path);
   }
 
-  // 2. Foydalanuvchining barcha shartnomalari
-  @Get('my')
-  async findAll(@Req() req: any) {
-    return this.escrowService.findAllByUser(req.user);
-  }
-
-  // 3. Invite Linkni tekshirish (Ochiq endpoint bo'lishi mumkin, lekin Guard bor)
-  @Get('invite/:token')
+  // ─── 2. INVITE TOKENNI TEKSHIRISH (RO'YXATDAN O'TIShDAN OLDIN) ──────────────
+  // Bu endpoint xaridor linkni bosganda UI qayerga yo'naltirishni bilishi uchun
+  @Get('invite/resolve/:token')
   async resolveInvite(@Param('token') token: string) {
     return this.escrowService.resolveInvite(token);
   }
 
-  // 4. Invite orqali shartnoma ma'lumotlarini olish
-  @Get('invite/:token/details')
+  // ─── 3. INVITE ORQALI SHARTNOMA TAFSILOTLARINI OLISH ───────────────────────
+  @Get('invite/details/:token')
   async getByToken(@Param('token') token: string, @Req() req: any) {
     return this.escrowService.getContractByToken(token, req.user);
   }
 
-  // 5. Bittasini ko'rish
+  // ─── 4. FOYDALANUVCHINING BARCHA SHARTNOMALARI ─────────────────────────────
+  @Get('my-contracts')
+  async findAll(@Req() req: any) {
+    return this.escrowService.findAllByUser(req.user);
+  }
+
+  // ─── 5. STATUSNI YANGILASH (AVTOMATIK HOLD SHU YERDA) ──────────────────────
+@Patch(':id/status')
+async updateStatus(
+  @Param('id', ParseIntPipe) id: number,
+  @Body('status') status: EscrowStatus,
+  @Req() req: any, // Majburiy parametr oldinga o'tdi ✅
+  @Body('cardId') cardId?: string, // Ixtiyoriy - oxirida ✅
+  @Body('reason') reason?: string, // Ixtiyoriy - oxirida ✅
+) {
+  return this.escrowService.updateStatus(id, status, req.user, {
+    cardId,
+    reason,
+  });
+}
+
+  // ─── 6. BITTASINI ID ORQALI KO'RISH ────────────────────────────────────────
   @Get(':id')
   async findOne(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
     return this.escrowService.findOne(id, req.user);
   }
 
-  // 6. Statusni yangilash (ACCEPTED, REJECTED, REVISION, COMPLETED)
-  @Patch(':id/status')
-  async updateStatus(
-    @Param('id', ParseIntPipe) id: number,
-    @Body('status') status: EscrowStatus,
-    @Body('reason') reason: string,
-    @Body('cardId') cardId: string, // ACCEPTED holati uchun kerak
-    @Req() req: any,
-  ) {
-    return this.escrowService.updateStatus(id, status, req.user, {
-      reason,
-      cardId,
-    });
-  }
-
-  // 7. Pulni muzlatish (Xaridor to'lov qilganda)
-  @Post(':id/hold-payment')
-  async holdPayment(
-    @Param('id', ParseIntPipe) id: number,
-    @Body('cardId') cardId: string,
-    @Req() req: any,
-  ) {
-    return this.escrowService.holdContractPayment(id, req.user, cardId);
-  }
-
-  // 8. Tahrirlash
-  @Patch(':id')
+  // ─── 7. SHARTNOMANI TAHRIRLASH ─────────────────────────────────────────────
+  @Patch(':id/update')
   @UseInterceptors(FileInterceptor('file'))
   async update(
     @Param('id', ParseIntPipe) id: number,
@@ -107,7 +100,7 @@ export class EscrocontractsController {
     return this.escrowService.update(id, dto, req.user, file?.path);
   }
 
-  // 9. Bekor qilish
+  // ─── 8. BEKOR QILISH (UNHOLD BILAN) ────────────────────────────────────────
   @Delete(':id/cancel')
   async cancel(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
     return this.escrowService.cancel(id, req.user);
