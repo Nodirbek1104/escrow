@@ -11,7 +11,6 @@ import {
   UploadedFile,
   UseInterceptors,
   ParseIntPipe,
-  BadRequestException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { EscrocontractsService } from './escrocontracts.service';
@@ -22,11 +21,11 @@ import { diskStorage } from 'multer';
 import { extname } from 'path';
 
 @Controller('escrow-contracts')
-@UseGuards(JwtAuthGuard) // Barcha so'rovlar uchun JWT token talab qilinadi
+@UseGuards(JwtAuthGuard)
 export class EscrocontractsController {
   constructor(private readonly escrowService: EscrocontractsService) {}
 
-  // ─── 1. SHARTNOMA YARATISH (IJROCHI) ───────────────────────────────────────
+  // 1. CREATE
   @Post()
   @UseInterceptors(
     FileInterceptor('file', {
@@ -44,51 +43,43 @@ export class EscrocontractsController {
     @Req() req: any,
     @UploadedFile() file?: Express.Multer.File,
   ) {
-    // Servisga ma'lumotlarni va fayl yo'lini uzatamiz
     return this.escrowService.create(dto, req.user, file?.path);
   }
 
-  // ─── 2. INVITE TOKENNI TEKSHIRISH (RO'YXATDAN O'TIShDAN OLDIN) ──────────────
-  // Bu endpoint xaridor linkni bosganda UI qayerga yo'naltirishni bilishi uchun
-  @Get('invite/resolve/:token')
-  async resolveInvite(@Param('token') token: string) {
-    return this.escrowService.resolveInvite(token);
-  }
-
-  // ─── 3. INVITE ORQALI SHARTNOMA TAFSILOTLARINI OLISH ───────────────────────
-  @Get('invite/details/:token')
-  async getByToken(@Param('token') token: string, @Req() req: any) {
-    return this.escrowService.getContractByToken(token, req.user);
-  }
-
-  // ─── 4. FOYDALANUVCHINING BARCHA SHARTNOMALARI ─────────────────────────────
+  // 2. MY CONTRACTS (Statik yo'llar har doim tepada bo'lishi kerak!)
   @Get('my-contracts')
   async findAll(@Req() req: any) {
     return this.escrowService.findAllByUser(req.user);
   }
 
-  // ─── 5. STATUSNI YANGILASH (AVTOMATIK HOLD SHU YERDA) ──────────────────────
-@Patch(':id/status')
-async updateStatus(
-  @Param('id', ParseIntPipe) id: number,
-  @Body('status') status: EscrowStatus,
-  @Req() req: any, // Majburiy parametr oldinga o'tdi ✅
-  @Body('cardId') cardId?: string, // Ixtiyoriy - oxirida ✅
-  @Body('reason') reason?: string, // Ixtiyoriy - oxirida ✅
-) {
-  return this.escrowService.updateStatus(id, status, req.user, {
-    cardId,
-    reason,
-  });
-}
-
-  // ─── 6. BITTASINI ID ORQALI KO'RISH ────────────────────────────────────────
-  @Get(':id')
-  async findOne(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
-    return this.escrowService.findOne(id, req.user);
+  // 3. INVITE RESOLVE
+  @Get('invite/resolve/:token')
+  async resolveInvite(@Param('token') token: string) {
+    return this.escrowService.resolveInvite(token);
   }
 
-  // ─── 7. SHARTNOMANI TAHRIRLASH ─────────────────────────────────────────────
+  // 4. INVITE DETAILS
+  @Get('invite/details/:token')
+  async getByToken(@Param('token') token: string, @Req() req: any) {
+    return this.escrowService.getContractByToken(token, req.user);
+  }
+
+  // 5. UPDATE STATUS (Majburiy parametrlar oldinda)
+  @Patch(':id/status')
+  async updateStatus(
+    @Param('id', ParseIntPipe) id: number,
+    @Body('status') status: EscrowStatus,
+    @Req() req: any,
+    @Body('cardId') cardId?: string,
+    @Body('reason') reason?: string,
+  ) {
+    return this.escrowService.updateStatus(id, status, req.user, {
+      cardId,
+      reason,
+    });
+  }
+
+  // 6. UPDATE (EDIT)
   @Patch(':id/update')
   @UseInterceptors(FileInterceptor('file'))
   async update(
@@ -100,7 +91,13 @@ async updateStatus(
     return this.escrowService.update(id, dto, req.user, file?.path);
   }
 
-  // ─── 8. BEKOR QILISH (UNHOLD BILAN) ────────────────────────────────────────
+  // 7. FIND ONE (Dinamik :id oxirida bo'lishi xavfsizroq)
+  @Get(':id')
+  async findOne(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+    return this.escrowService.findOne(id, req.user);
+  }
+
+  // 8. CANCEL
   @Delete(':id/cancel')
   async cancel(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
     return this.escrowService.cancel(id, req.user);
