@@ -4,21 +4,32 @@ import { Repository } from 'typeorm';
 import axios, { AxiosInstance } from 'axios';
 import { Card } from './entities/payment.entity';
 import { handlePaymentError } from './utils/payment-error.handler';
+import { ConfigService } from '@nestjs/config';
 
 @Injectable()
 export class PaymentService {
   private readonly client: AxiosInstance;
   private readonly logger = new Logger(PaymentService.name);
 
-  constructor(
+ constructor(
     @InjectRepository(Card)
     private cardRepository: Repository<Card>,
+    private configService: ConfigService, // ConfigService-ni inject qiling
   ) {
+    const baseUrl = this.configService.get<string>('PAYLOV_BASE_URL');
+    const token = this.configService.get<string>('PAYLOV_TOKEN');
+    const merchantId = this.configService.get<string>('PAYLOV_MERCHANT_ID');
+
+    // Debug uchun: agar birortasi bo'sh bo'lsa, logda ko'rasiz
+    if (!baseUrl) {
+      console.error('DIQQAT: PAYLOV_BASE_URL topilmadi!');
+    }
+
     this.client = axios.create({
-      baseURL: process.env.PAYLOV_BASE_URL,
+      baseURL: baseUrl,
       headers: {
-        'Authorization': `Bearer ${process.env.PAYLOV_TOKEN}`,
-        'Merchant-Id': process.env.PAYLOV_MERCHANT_ID,
+        'Authorization': `Bearer ${token}`,
+        'Merchant-Id': merchantId,
         'Content-Type': 'application/json',
       },
     });
