@@ -28,7 +28,7 @@ export class PaymentService {
   async createCard(userId: number, cardNumber: string, expireDate: string, phoneNumber: string) {
     try {
       const { data } = await this.client.post('/cards/create', {
-        userId: userId.toString(), // Paylov userId ni string formatda kutadi
+       userId: String(userId), // Paylov userId ni string formatda kutadi
         cardNumber,
         expireDate,
         phoneNumber,

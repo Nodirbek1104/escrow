@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, Param, Delete, UseGuards, Req, HttpCode, HttpStatus } from '@nestjs/common';
+import { Controller, Post, Get, Body, Param, Delete, UseGuards, Req, HttpCode, HttpStatus, UnauthorizedException } from '@nestjs/common';
 import { PaymentService } from './payment.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard'; // Yo'lni tekshiring
 
@@ -7,11 +7,17 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard'; // Yo'lni tekshiri
 export class PaymentController {
   constructor(private readonly paymentService: PaymentService) {}
 
-  @Post('cards/create')
-  @HttpCode(HttpStatus.OK)
-  async createCard(@Req() req: any, @Body() body: { cardNumber: string; expireDate: string; phoneNumber: string }) {
-    return this.paymentService.createCard(req.user.id, body.cardNumber, body.expireDate, body.phoneNumber);
+ @Post('cards/create')
+async createCard(@Req() req: any, @Body() body: any) {
+  // Eng xavfsiz yo'li: ham 'id', ham 'userId'ni tekshirish
+  const userId = req.user?.id || req.user?.userId;
+
+  if (!userId) {
+    throw new UnauthorizedException("Foydalanuvchi ma'lumotlari topilmadi. Tokenni tekshiring.");
   }
+
+  return this.paymentService.createCard(userId, body.cardNumber, body.expireDate, body.phoneNumber);
+}
 
   @Post('cards/confirm')
   @HttpCode(HttpStatus.OK)
