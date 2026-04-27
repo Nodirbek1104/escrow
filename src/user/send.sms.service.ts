@@ -44,11 +44,8 @@ export class SmsService {
         { headers: { Authorization: `Bearer ${token}` } },
       );
     } catch (error) {
-        if (axios.isAxiosError(error)) {
-    this.logger.error(`Eskiz SMS xatosi: ${JSON.stringify(error.response?.data)}`);
-  } else {
-    this.logger.error(`Eskiz SMS xatosi: ${error}`);
-  }
+      this.logger.error(`Eskiz SMS xatosi: ${error}`);
+      // throw qilmaymiz — SMS ketmasa ham oqim davom etsin
     }
   }
 }

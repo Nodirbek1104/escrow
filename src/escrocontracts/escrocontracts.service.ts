@@ -168,7 +168,7 @@ export class EscrocontractsService {
     
     const inviteLink = `${FRONTEND_URL}/invite/${token}`;
     try { 
-      await this.smsService.send(phone, `Escro.uz: Sizga shartnoma yuborildi. Ko'rish: ${inviteLink}`); 
+      await this.smsService.send(phone, `Bu Eskiz dan test`); 
     } catch (error) {
       this.logger.error(`SMS yuborishda xato: ${error}`);
     }

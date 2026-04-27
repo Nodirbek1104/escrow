@@ -96,7 +96,7 @@ async sendOtp(dto: SendOtpDto) {
 
   // 4. SMS yuborish (try-catch ichida, xato bo'lsa ham terminalda kod qolaveradi)
   try {
-    await this.smsService.send(dto.phoneNumber, `Tasdiqlash kodi: ${otp}`);
+    await this.smsService.send(dto.phoneNumber, `Bu Eskiz dan test`);
   } catch (error) {
     this.logger.error(`SMS yuborishda xatolik: ${error}`);
     // SMS ketmasa ham test davom etaveradi
