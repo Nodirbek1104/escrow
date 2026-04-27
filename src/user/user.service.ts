@@ -117,7 +117,7 @@ async forgotPassword(dto: ForgotPasswordDto) {
   await this.redis.set(`reset_otp:${dto.phoneNumber}`, otp, 'EX', 300);
 
   // Eskiz test SMS yuborish
-  await this.sendSmsViaEskiz(dto.phoneNumber, `Bu Eskiz dan test`);
+  await this.smsService.send(dto.phoneNumber, `Bu Eskiz dan test`);
 
   // Kodni terminalga chiqarish
   console.log('------------------------------------------');
