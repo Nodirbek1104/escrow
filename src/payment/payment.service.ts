@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import axios, { AxiosInstance } from 'axios';
@@ -25,16 +25,34 @@ export class PaymentService {
   }
 
   // 1. Create Card - Karta ulanishini boshlash
-  async createCard(userId: number, cardNumber: string, expireDate: string, phoneNumber: string) {
+ async createCard(userId: number | string, cardNumber: string, expireDate: string, phoneNumber: string) {
     try {
+      // Xavfsizlik uchun userId borligini tekshiramiz
+      if (!userId) {
+        throw new BadRequestException('Foydalanuvchi ID-si (userId) taqdim etilmadi');
+      }
+
       const { data } = await this.client.post('/cards/create', {
-       userId: String(userId), // Paylov userId ni string formatda kutadi
-        cardNumber,
-        expireDate,
-        phoneNumber,
+        // userId har doim string bo'lishini ta'minlaymiz
+        userId: String(userId), 
+        cardNumber: cardNumber.replace(/\s+/g, ''), // Probellarni olib tashlaydi
+        expireDate: expireDate.replace(/\//g, ''),  // 12/26 -> 1226 formatga o'tkazadi
+        phoneNumber: phoneNumber.replace(/\+/g, ''), // + belgisini olib tashlaydi
       });
+
       return data;
     } catch (error) {
+      this.logger.error(`Paylov API Error: ${error}`);
+      
+      // Invalid URL yoki boshqa tizim xatolarini ushlash
+      if (error instanceof TypeError && error.message.includes('Invalid URL')) {
+        return {
+          status: 'error',
+          message: ".env faylida PAYLOV_BASE_URL noto'g'ri ko'rsatilgan",
+        };
+      }
+
+      // Tashqi funksiya orqali xatolikni qayta ishlash
       return handlePaymentError(error);
     }
   }
