@@ -181,16 +181,34 @@ export class EscrocontractsService {
     }
   }
 
-  async getContractByToken(token: string, user: any) {
-    const raw = await this.redis.get(`contract_invite:${token}`);
-    if (!raw) throw new BadRequestException("Link muddati o'tgan");
+async getContractByToken(token: string, user: any) {
+  const raw = await this.redis.get(`contract_invite:${token}`);
+  if (!raw) throw new BadRequestException("Link muddati o'tgan");
 
-    const payload = JSON.parse(raw);
-    if (payload.phone.replace('+', '') !== user.phoneNumber.replace('+', '')) {
-      throw new ForbiddenException('Bu link sizga tegishli emas');
-    }
-    return this.findOne(payload.contractId, user);
+  const payload = JSON.parse(raw);
+
+  // 1. O'zgaruvchilarni xavfsiz olish (String() va ?. ishlatish)
+  // Bu yerda payload.phone yoki user.phoneNumber bo'lmasa, replace ishga tushmaydi
+  const payloadPhone = payload?.phone ? String(payload.phone).replace(/\D/g, '') : null;
+  const userPhone = user?.phoneNumber ? String(user.phoneNumber).replace(/\D/g, '') : null;
+
+  // 2. Agar foydalanuvchida raqam bo'lmasa, aniq xato beramiz
+  if (!userPhone) {
+    this.logger.error(`Foydalanuvchi ob'ektida phoneNumber topilmadi: ${JSON.stringify(user)}`);
+    throw new ForbiddenException("Profilingizda telefon raqami ko'rsatilmagan (JWT xatosi)");
   }
+
+  // 3. Agar Redis dagi payloadda raqam bo'lmasa
+  if (!payloadPhone) {
+    throw new BadRequestException("Link ma'lumotlari buzilgan yoki telefon raqami topilmadi");
+  }
+
+  if (payloadPhone !== userPhone) {
+    throw new ForbiddenException('Bu link boshqa telefon raqamiga tegishli');
+  }
+
+  return this.findOne(payload.contractId, user);
+}
 
   async findAllByUser(user: any) {
     return this.contractRepo.find({
