@@ -10,7 +10,7 @@ import { AuthModule } from '../auth/auth.module';
 import dotenv from 'dotenv';
 import { UserDevice } from './entities/user-device.entity';
 import { JwtStrategy } from './jwt.strategy';
-import { SmsModule } from '../sms/sms.module';
+import { SmsModule } from './sms.module';
 dotenv.config();
 
 @Module({
