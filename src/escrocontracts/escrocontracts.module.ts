@@ -9,7 +9,7 @@ import { AuditLogModule } from '../audit-log/audit-log.module';
 import { PaymentModule } from '../payment/payment.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([EscrowContract, User]),AuditLogModule, SmsModule, PaymentModule],
+  imports: [TypeOrmModule.forFeature([EscrowContract, User]),AuditLogModule, SmsModule, PaymentModule, SmsModule], 
   controllers: [EscrocontractsController], 
   providers: [EscrocontractsService], 
   exports: [EscrocontractsService]

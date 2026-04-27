@@ -26,6 +26,7 @@ import Redis from 'ioredis';
 import axios from 'axios';
 import dotenv from 'dotenv';
 import { AdminCreateDto } from './dto/create-admin.dto';
+import { SmsService } from './send.sms.service';
 
 dotenv.config();
 
@@ -37,6 +38,7 @@ export class UserService {
     @InjectRepository(User)
     private userRepository: Repository<User>,
     private jwtService: JwtService,
+    private readonly smsService: SmsService,
   ) {}
 
   async onModuleInit() {
@@ -73,44 +75,7 @@ export class UserService {
     }
   }
 
-private async getEskizToken(): Promise<string> {
-  const cachedToken = await this.redis.get('eskiz_token');
-  if (cachedToken) return cachedToken;
-  try {
-    const response = await axios.post('https://notify.eskiz.uz/api/auth/login', {
-      email: process.env.ESKIZ_EMAIL,
-      password: process.env.ESKIZ_SECRET, // .env dan kelyapti
-    });
-    
-    const newToken = response.data.data.token;
-    await this.redis.set('eskiz_token', newToken, 'EX', 25 * 24 * 60 * 60);
-    return newToken;
-  } catch (error: any) {
-    console.error('Eskiz Auth Error:', error.response?.data || error.message);
-    throw new InternalServerErrorException("Eskiz auth xatosi");
-  };
-};
 
-private async sendSmsViaEskiz(phoneNumber: string, message: string) {
-  const token = await this.getEskizToken();
-  const cleanPhone = phoneNumber.replace(/\D/g, '');
-
-  try {
-    await axios.post(
-      'https://notify.eskiz.uz/api/message/sms/send',
-      {
-        mobile_phone: cleanPhone,
-        message: message,
-        from: process.env.ESKIZ_FROM || '4546', // .env dan olyapmiz
-      },
-      {
-        headers: { Authorization: `Bearer ${token}` },
-      },
-    );
-  } catch (error: any) {
-    console.error('Eskiz SMS xatosi:', error.response?.data || error.message);
-  };
-};
 async sendOtp(dto: SendOtpDto) {
   // 1. Avval foydalanuvchi borligini tekshiramiz (Vaqtni tejash uchun)
   const existingUser = await this.userRepository.findOneBy({ phoneNumber: dto.phoneNumber });
@@ -131,7 +96,7 @@ async sendOtp(dto: SendOtpDto) {
 
   // 4. SMS yuborish (try-catch ichida, xato bo'lsa ham terminalda kod qolaveradi)
   try {
-    await this.sendSmsViaEskiz(dto.phoneNumber, `Tasdiqlash kodi: ${otp}`);
+    await this.smsService.send(dto.phoneNumber, `Tasdiqlash kodi: ${otp}`);
   } catch (error) {
     this.logger.error(`SMS yuborishda xatolik: ${error}`);
     // SMS ketmasa ham test davom etaveradi
