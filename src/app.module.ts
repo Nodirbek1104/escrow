@@ -14,6 +14,7 @@ import { PaymentModule } from './payment/payment.module';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { APP_GUARD } from '@nestjs/core';
 import { TelegramGuard } from './auth/guards/telegram.guard';
+import { MessagesModule } from './messages/messages.module';
 
 dotenv.config();
 
@@ -44,6 +45,7 @@ dotenv.config();
     EscrocontractsModule,
     AuditLogModule,
     PaymentModule,
+    MessagesModule,
   ],
   controllers: [AppController],
   providers: [
