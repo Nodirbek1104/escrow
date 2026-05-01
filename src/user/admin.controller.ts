@@ -5,8 +5,11 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { UserRole } from './entities/user.entity';
 import { AdminCreateDto } from './dto/create-admin.dto';
+import { AuditInterceptor } from '../audit-log/audit-log.interceptor';
+import { UseInterceptors } from '@nestjs/common';
 
 @Controller('admin')
+@UseInterceptors(AuditInterceptor)
 export class AdminController {
   constructor(private readonly userService: UserService) {}
 

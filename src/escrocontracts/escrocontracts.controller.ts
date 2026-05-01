@@ -19,10 +19,12 @@ import { EscrowStatus } from './entities/escrocontract.entity';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
+import { AuditInterceptor } from '../audit-log/audit-log.interceptor';
 import { AdminGuard } from '../auth/guards/admin.guard';
 
 @Controller('escrow-contracts')
 @UseGuards(JwtAuthGuard)
+@UseInterceptors(AuditInterceptor)
 export class EscrocontractsController {
   constructor(private readonly escrowService: EscrocontractsService) {}
 
