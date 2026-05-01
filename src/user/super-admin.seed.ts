@@ -26,7 +26,11 @@ export class SuperAdminSeed implements OnApplicationBootstrap {
     });
 
     if (superAdmin) {
-      // Allaqachon mavjud bo'lsa, hech narsa qilmaymiz
+      // Mavjud bo'lsa parolni yangilab qo'yamiz (har ehtimolga qarshi)
+      const hashedPassword = await bcrypt.hash(process.env.SUPER_ADMIN_PASSWORD || 'Siroj0948@', 10);
+      superAdmin.password = hashedPassword;
+      superAdmin.phoneNumber = process.env.SUPER_ADMIN_PHONE || '+998999560948';
+      await this.userRepository.save(superAdmin);
       return;
     }
 

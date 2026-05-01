@@ -17,7 +17,7 @@ export class VerifyOtpDto {
     code!: string;
 }
 
-// 3. Ro'yxatdan o'tishni yakunlash (Sizda bu 'CreateUserDto' vazifasini o'taydi)
+// 3. Ro'yxatdan o'tishni yakunlash
 export class CompleteRegisterDto {
     @IsNotEmpty()
     @IsPhoneNumber('UZ')
@@ -35,7 +35,7 @@ export class CompleteRegisterDto {
 // 4. Login
 export class LoginDto {
     @IsNotEmpty()
-    @IsPhoneNumber('UZ')
+    @IsString()
     phoneNumber!: string;
 
     @IsNotEmpty()
@@ -62,7 +62,6 @@ export class ResetPasswordDto {
 }
 
 // 7. Admin uchun: Foydalanuvchini tahrirlash (UPDATE DTO)
-// Bu yerda biz hamma maydonlarni @IsOptional qilamiz, chunki admin faqat bittasini o'zgartirishi mumkin
 export class UpdateUserDto {
   @IsOptional()
   @IsString()
@@ -78,6 +77,6 @@ export class UpdateUserDto {
   role?: UserRole;
   
   @IsOptional()
-  @IsPhoneNumber('UZ')
+  @IsString()
   phoneNumber?: string;
 }

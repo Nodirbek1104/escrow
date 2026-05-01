@@ -3,6 +3,7 @@ import { AppModule } from './app.module';
 import { ValidationPipe } from '@nestjs/common';
 import { AuditInterceptor } from './audit-log/audit-log.interceptor'; // Yo'lni tekshiring
 import { AuditLogService } from './audit-log/audit-log.service';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import * as dotenv from 'dotenv';
 
 dotenv.config();
@@ -17,6 +18,21 @@ async function bootstrap() {
     transform: true
   }));
 
+  app.setGlobalPrefix('api');
+  app.enableCors({
+    origin: true,
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+    credentials: true,
+  });
+
+  const config = new DocumentBuilder()
+    .setTitle('Escro API')
+    .setDescription('The Escro Application API description')
+    .setVersion('1.0')
+    .addBearerAuth()
+    .build();
+  const document = SwaggerModule.createDocument(app, config);
+  SwaggerModule.setup('api/docs', app, document);
 
   await app.listen(process.env.PORT ?? 3000, () => {
     console.log(`🚀 Server is running on port ${process.env.PORT ?? 3000}`);

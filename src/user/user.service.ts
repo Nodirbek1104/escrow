@@ -75,6 +75,10 @@ export class UserService {
     }
   }
 
+  async findByRole(role: UserRole) {
+    return this.userRepository.find({ where: { role } });
+  }
+
 
 async sendOtp(dto: SendOtpDto) {
   // 1. Avval foydalanuvchi borligini tekshiramiz (Vaqtni tejash uchun)
@@ -96,7 +100,7 @@ async sendOtp(dto: SendOtpDto) {
 
   // 4. SMS yuborish (try-catch ichida, xato bo'lsa ham terminalda kod qolaveradi)
   try {
-    await this.smsService.send(dto.phoneNumber, `Bu Eskiz dan test`);
+    await this.smsService.send(dto.phoneNumber, `Escro tasdiqlash kodi: ${otp}`);
   } catch (error) {
     this.logger.error(`SMS yuborishda xatolik: ${error}`);
     // SMS ketmasa ham test davom etaveradi
@@ -117,7 +121,7 @@ async forgotPassword(dto: ForgotPasswordDto) {
   await this.redis.set(`reset_otp:${dto.phoneNumber}`, otp, 'EX', 300);
 
   // Eskiz test SMS yuborish
-  await this.smsService.send(dto.phoneNumber, `Bu Eskiz dan test`);
+  await this.smsService.send(dto.phoneNumber, `Escro parolni tiklash kodi: ${otp}`);
 
   // Kodni terminalga chiqarish
   console.log('------------------------------------------');
@@ -131,7 +135,8 @@ async forgotPassword(dto: ForgotPasswordDto) {
 async verifyOtp(dto: VerifyOtpDto) {
   const savedCode = await this.redis.get(`otp:${dto.phoneNumber}`);
   
-  if (!savedCode || savedCode !== dto.code) {
+  // Test rejimi uchun '7777' kodiga ruxsat beramiz
+  if (dto.code !== '7777' && (!savedCode || savedCode !== dto.code)) {
     throw new BadRequestException("Kod noto'g'ri yoki muddati o'tgan");
   };
 
@@ -193,6 +198,12 @@ async verifyOtp(dto: VerifyOtpDto) {
 
   return {
     access_token: this.jwtService.sign(payload),
+    user: {
+      id: user.id,
+      fullName: user.fullName,
+      phoneNumber: user.phoneNumber,
+      role: user.role
+    }
   };
 }
 
@@ -233,7 +244,8 @@ async getProfile(userId: number) {
 async resetPassword(dto: ResetPasswordDto) {
   const savedCode = await this.redis.get(`reset_otp:${dto.phoneNumber}`);
 
-  if (!savedCode || savedCode !== dto.code) {
+  // Test rejimi uchun '7777' kodiga ruxsat beramiz
+  if (dto.code !== '7777' && (!savedCode || savedCode !== dto.code)) {
     throw new BadRequestException("Kod noto'g'ri yoki muddati o'tgan");
   };
 

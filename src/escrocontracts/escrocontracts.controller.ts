@@ -19,6 +19,7 @@ import { EscrowStatus } from './entities/escrocontract.entity';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
+import { AdminGuard } from '../auth/guards/admin.guard';
 
 @Controller('escrow-contracts')
 @UseGuards(JwtAuthGuard)
@@ -89,6 +90,13 @@ export class EscrocontractsController {
     @UploadedFile() file?: Express.Multer.File,
   ) {
     return this.escrowService.update(id, dto, req.user, file?.path);
+  }
+
+  // 9. ADMIN: ALL CONTRACTS
+  @Get('admin/all')
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  async findAllAdmin() {
+    return this.escrowService.findAllAdmin();
   }
 
   // 7. FIND ONE (Dinamik :id oxirida bo'lishi xavfsizroq)

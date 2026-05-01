@@ -21,4 +21,11 @@ export class AuditLogService {
     } catch (error) {
     }
   }
+
+  async findAll() {
+    return this.auditLogRepo.find({
+      order: { createdAt: 'DESC' },
+      take: 100,
+    });
+  }
 }

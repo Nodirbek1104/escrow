@@ -112,7 +112,10 @@ export class EscrocontractsService {
 
       // Shartnoma yakunlanganda pulni o'tkazish
       if (status === EscrowStatus.COMPLETED) {
-        if (contract.creatorId !== user.userId) throw new ForbiddenException('Faqat ijrochi/xaridor yopishi mumkin');
+        const isAdmin = user.role === 'admin' || user.role === 'super_admin';
+        if (!isAdmin && contract.creatorId !== user.userId) {
+          throw new ForbiddenException('Faqat ijrochi yoki Admin yopishi mumkin');
+        }
         
         const res = await this.paymentService.fulfillEscrow(contract.transactionId!, contract.receiverCardId!);
         if (!res.result) throw new BadRequestException('To‘lovni amalga oshirishda xatolik');
@@ -136,6 +139,14 @@ export class EscrocontractsService {
         relations: ['creator'] 
       });
       if (!contract) throw new NotFoundException('Shartnoma topilmadi');
+      
+      // Admin bo'lsa hamma shartnomani ko'ra oladi
+      const isAdmin = user.role === 'admin' || user.role === 'super_admin';
+      if (!isAdmin && contract.creatorId !== user.userId && contract.executorPhoneNumber !== user.phoneNumber) {
+         // Agar shartnoma tarafi bo'lmasa, ko'rish taqiqlanadi
+         throw new ForbiddenException('Sizda ushbu shartnomani ko‘rish huquqi yo‘q');
+      }
+
       return contract;
     } catch (error) {
       if (error instanceof NotFoundException) throw error;
@@ -147,6 +158,11 @@ export class EscrocontractsService {
   async cancel(id: number, user: any) {
     try {
       const contract = await this.findOne(id, user);
+      
+      const isAdmin = user.role === 'admin' || user.role === 'super_admin';
+      if (!isAdmin && contract.creatorId !== user.userId) {
+        throw new ForbiddenException('Bekor qilish huquqi yo‘q');
+      }
       
       if (contract.status === EscrowStatus.PAYMENT_HELD) {
         // Pul muzlatilgan bo'lsa, uni yechib yuboramiz (unhold)
@@ -216,6 +232,13 @@ async getContractByToken(token: string, user: any) {
         { creatorId: user.userId },
         { executorPhoneNumber: user.phoneNumber },
       ],
+      relations: ['creator'],
+      order: { createdAt: 'DESC' },
+    });
+  }
+
+  async findAllAdmin() {
+    return this.contractRepo.find({
       relations: ['creator'],
       order: { createdAt: 'DESC' },
     });
