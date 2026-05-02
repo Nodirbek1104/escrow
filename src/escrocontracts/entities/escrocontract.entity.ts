@@ -14,6 +14,7 @@ export enum EscrowStatus {
   ACTIVE    = 'active',   // Ish jarayoni ketmoqda
   COMPLETED = 'completed', // Ish yakunlandi, pul ijrochiga o'tkazildi
   CANCELLED = 'cancelled', // Bekor qilindi, pul xaridorga qaytarildi
+  DISPUTED  = 'disputed',  // Nizo holatida (Admin aralashuvi kerak)
 }
 
 @Entity('escrow_contracts')

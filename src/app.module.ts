@@ -1,10 +1,12 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config'; // <--- Mana shu qator kerak
+import { ServeStaticModule } from '@nestjs/serve-static';
+import { join } from 'path';
+import { ConfigModule } from '@nestjs/config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { UserModule } from './user/user.module';
-import dotenv, { config } from "dotenv";
+import dotenv from "dotenv";
 import { RedisModule } from '@nestjs-modules/ioredis';
 import { EscrocontractsModule } from './escrocontracts/escrocontracts.module';
 import { AuditLogModule } from './audit-log/audit-log.module';
@@ -15,6 +17,7 @@ import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { APP_GUARD } from '@nestjs/core';
 import { TelegramGuard } from './auth/guards/telegram.guard';
 import { MessagesModule } from './messages/messages.module';
+import { NotificationsModule } from './notifications/notifications.module';
 
 dotenv.config();
 
@@ -23,9 +26,15 @@ dotenv.config();
     ConfigModule.forRoot({
       isGlobal: true, 
     }),
+    ServeStaticModule.forRoot({
+      rootPath: process.env.NODE_ENV === 'production' 
+        ? '/home/ubuntu/escro-frontend/dist/client' 
+        : join(__dirname, '..', 'uploads'),
+      exclude: ['/api*'],
+    }),
     ThrottlerModule.forRoot([{
-      ttl: 60000, // 1 minut
-      limit: 15,  // 1 minutda max 15 so'rov
+      ttl: 60000,
+      limit: 15,
     }]),
     RedisModule.forRoot({
       type: 'single',
@@ -46,6 +55,7 @@ dotenv.config();
     AuditLogModule,
     PaymentModule,
     MessagesModule,
+    NotificationsModule,
   ],
   controllers: [AppController],
   providers: [
@@ -57,10 +67,6 @@ dotenv.config();
     {
       provide: APP_GUARD,
       useClass: ThrottlerGuard,
-    },
-    {
-      provide: APP_GUARD,
-      useClass: TelegramGuard,
     },
   ],
 })

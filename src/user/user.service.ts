@@ -193,6 +193,7 @@ async verifyOtp(dto: VerifyOtpDto) {
   const payload = { 
     sub: user.id, 
     phoneNumber: user.phoneNumber, 
+    fullName: user.fullName,
     role: user.role // AdminGuard shu yerdan o'qiydi
   };
 

@@ -1,6 +1,6 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne } from 'typeorm';
 import { User } from '../../user/entities/user.entity';
-import { Escrocontract } from '../../escrocontracts/entities/escrocontract.entity';
+import { EscrowContract } from '../../escrocontracts/entities/escrocontract.entity';
 
 @Entity()
 export class Message {
@@ -13,8 +13,8 @@ export class Message {
   @Column({ nullable: true })
   fileUrl: string;
 
-  @ManyToOne(() => Escrocontract, (contract) => contract.id)
-  contract: Escrocontract;
+  @ManyToOne(() => EscrowContract, (contract) => contract.id)
+  contract: EscrowContract;
 
   @Column()
   contractId: number;

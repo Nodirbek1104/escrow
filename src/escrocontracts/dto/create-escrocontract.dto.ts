@@ -15,7 +15,7 @@ export class CreateEscrowContractDto {
   @Type(() => Number)
   @IsNumber()
   @Min(1)
-  @Max(28)
+  @Max(3650)
   deadline!: number;
 
   @IsString()

@@ -11,6 +11,7 @@ import dotenv from 'dotenv';
 import { UserDevice } from './entities/user-device.entity';
 import { JwtStrategy } from './jwt.strategy';
 import { SmsModule } from './sms.module';
+import { AuditLogModule } from '../audit-log/audit-log.module';
 dotenv.config();
 
 @Module({
@@ -21,7 +22,8 @@ dotenv.config();
       signOptions: { expiresIn: '1d' },
     }),
     AuthModule,
-    SmsModule
+    SmsModule,
+    AuditLogModule
   ],
   controllers: [UserController, AdminController],
   providers: [UserService, SuperAdminSeed, JwtStrategy], // ← JwtStrategy olib tashlandi

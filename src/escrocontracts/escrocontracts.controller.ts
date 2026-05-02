@@ -23,12 +23,12 @@ import { AuditInterceptor } from '../audit-log/audit-log.interceptor';
 import { AdminGuard } from '../auth/guards/admin.guard';
 
 @Controller('escrow-contracts')
-@UseGuards(JwtAuthGuard)
 @UseInterceptors(AuditInterceptor)
 export class EscrocontractsController {
   constructor(private readonly escrowService: EscrocontractsService) {}
 
   // 1. CREATE
+  @UseGuards(JwtAuthGuard)
   @Post()
   @UseInterceptors(
     FileInterceptor('file', {
@@ -50,6 +50,7 @@ export class EscrocontractsController {
   }
 
   // 2. MY CONTRACTS (Statik yo'llar har doim tepada bo'lishi kerak!)
+  @UseGuards(JwtAuthGuard)
   @Get('my-contracts')
   async findAll(@Req() req: any) {
     return this.escrowService.findAllByUser(req.user);
@@ -68,6 +69,7 @@ export class EscrocontractsController {
   }
 
   // 5. UPDATE STATUS (Majburiy parametrlar oldinda)
+  @UseGuards(JwtAuthGuard)
   @Patch(':id/status')
   async updateStatus(
     @Param('id', ParseIntPipe) id: number,
@@ -83,6 +85,7 @@ export class EscrocontractsController {
   }
 
   // 6. UPDATE (EDIT)
+  @UseGuards(JwtAuthGuard)
   @Patch(':id/update')
   @UseInterceptors(FileInterceptor('file'))
   async update(
@@ -102,12 +105,14 @@ export class EscrocontractsController {
   }
 
   // 7. FIND ONE (Dinamik :id oxirida bo'lishi xavfsizroq)
+  @UseGuards(JwtAuthGuard)
   @Get(':id')
   async findOne(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
     return this.escrowService.findOne(id, req.user);
   }
 
   // 8. CANCEL
+  @UseGuards(JwtAuthGuard)
   @Delete(':id/cancel')
   async cancel(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
     return this.escrowService.cancel(id, req.user);

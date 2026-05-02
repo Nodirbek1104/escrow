@@ -7,9 +7,10 @@ import { User } from '../user/entities/user.entity';
 import { SmsModule } from '../user/sms.module';
 import { AuditLogModule } from '../audit-log/audit-log.module';
 import { PaymentModule } from '../payment/payment.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([EscrowContract, User]),AuditLogModule, SmsModule, PaymentModule, SmsModule], 
+  imports: [TypeOrmModule.forFeature([EscrowContract, User]),AuditLogModule, SmsModule, PaymentModule, SmsModule, NotificationsModule], 
   controllers: [EscrocontractsController], 
   providers: [EscrocontractsService], 
   exports: [EscrocontractsService]

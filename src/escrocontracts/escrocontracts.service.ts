@@ -15,6 +15,7 @@ import { SmsService } from '../user/send.sms.service';
 import { InjectRedis } from '@nestjs-modules/ioredis';
 import Redis from 'ioredis';
 import { PaymentService } from '../payment/payment.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { error } from 'console';
 
 const INVITE_TTL = 60 * 60 * 24; // 24 soat
@@ -31,6 +32,7 @@ export class EscrocontractsService {
     private readonly userRepo: Repository<User>,
     private readonly smsService: SmsService,
     private readonly paymentService: PaymentService,
+    private readonly notificationsService: NotificationsService,
     @InjectRedis() private readonly redis: Redis,
   ) {}
 
@@ -47,6 +49,15 @@ export class EscrocontractsService {
       const saved = await this.contractRepo.save(contract);
       const token = await this.sendInviteSms(saved.id, dto.executorPhoneNumber);
       
+      // Notify creator (Success)
+      await this.notificationsService.create(
+        user.userId,
+        "Shartnoma yaratildi",
+        `#ESC-${saved.id} raqamli shartnoma muvaffaqiyatli yaratildi. Ijrochi tasdiqlashini kuting.`,
+        "contract_created",
+        saved.id.toString()
+      );
+
       return { ...saved, inviteToken: token };
     } catch (error) {
       this.logger.error(`Create Error: ${error}`);
@@ -63,11 +74,17 @@ export class EscrocontractsService {
       const payload = JSON.parse(raw);
       const user = await this.userRepo.findOne({ where: { phoneNumber: payload.phone } });
 
+      const contract = await this.contractRepo.findOne({ where: { id: payload.contractId } });
+
       return {
         action: user ? 'login' : 'register',
         contractId: payload.contractId,
         phoneNumber: payload.phone,
         token,
+        contract: contract ? {
+          title: contract.title,
+          amount: contract.amount,
+        } : null
       };
     } catch (error) {
       this.logger.error(`ResolveInvite Error: ${error}`);
@@ -86,8 +103,8 @@ export class EscrocontractsService {
       const contract = await this.findOne(id, user);
       this.validateStatusTransition(contract.status, status);
 
-      // QOIDALAR: Xaridor ACCEPTED qilganda pul majburiy muzlatiladi
-      if (status === EscrowStatus.ACCEPTED) {
+      // QOIDALAR: Xaridor (Creator) ACCEPTED qilganda pul majburiy muzlatiladi
+      if (status === EscrowStatus.ACCEPTED && user.userId === contract.creatorId) {
         if (!data?.cardId) {
           throw new BadRequestException('Shartnomani tasdiqlash uchun karta kiritish shart!');
         }
@@ -104,10 +121,16 @@ export class EscrocontractsService {
           contract.transactionId = holdResult.result.transactionId;
           contract.senderCardId = data.cardId;
           contract.status = EscrowStatus.PAYMENT_HELD; // Avtomatik HELD holatiga o'tadi
-          contract.executorId = user.userId; // Xaridorni bog'laymiz
         } else {
           throw new BadRequestException('Kartada mablag‘ yetarli emas yoki hold jarayonida xatolik!');
         }
+      } else if (status === EscrowStatus.ACCEPTED) {
+        // Agar ijrochi (sotuvchi) qabul qilayotgan bo'lsa
+        if (!data?.cardId) {
+          throw new BadRequestException('Shartnomani qabul qilish uchun pul tushadigan kartangizni tanlang!');
+        }
+        contract.receiverCardId = data.cardId;
+        contract.status = EscrowStatus.ACCEPTED;
       }
 
       // Shartnoma yakunlanganda pulni o'tkazish
@@ -117,14 +140,35 @@ export class EscrocontractsService {
           throw new ForbiddenException('Faqat ijrochi yoki Admin yopishi mumkin');
         }
         
-        const res = await this.paymentService.fulfillEscrow(contract.transactionId!, contract.receiverCardId!);
+        const res = await this.paymentService.fulfillEscrow(contract.transactionId!, contract.amount);
         if (!res.result) throw new BadRequestException('To‘lovni amalga oshirishda xatolik');
         contract.status = EscrowStatus.COMPLETED;
       }
 
       if (data?.reason) contract.rejectionReason = data.reason;
+
+      if (status === EscrowStatus.DISPUTED) {
+        if (!data?.reason) {
+          throw new BadRequestException('Nizo ochish uchun sabab ko‘rsatish shart!');
+        }
+        contract.status = EscrowStatus.DISPUTED;
+      }
       
-      return await this.contractRepo.save(contract);
+      const savedContract = await this.contractRepo.save(contract);
+
+      // Trigger Notifications
+      const targetUserId = (user.userId === savedContract.creatorId) ? savedContract.executorId : savedContract.creatorId;
+      if (targetUserId) {
+        await this.notificationsService.create(
+          targetUserId,
+          "Shartnoma holati o'zgardi",
+          `#ESC-${savedContract.id} shartnomasi "${status}" holatiga o'tkazildi.`,
+          "contract_update",
+          savedContract.id.toString()
+        );
+      }
+
+      return savedContract;
     } catch (error) {
       this.logger.error(`UpdateStatus Error: ${error}`);
       throw error;
@@ -166,7 +210,7 @@ export class EscrocontractsService {
       
       if (contract.status === EscrowStatus.PAYMENT_HELD) {
         // Pul muzlatilgan bo'lsa, uni yechib yuboramiz (unhold)
-        await this.paymentService.cancelTransaction(contract.transactionId!);
+        await this.paymentService.cancelHold(contract.transactionId!);
       }
       
       contract.status = EscrowStatus.CANCELLED;
