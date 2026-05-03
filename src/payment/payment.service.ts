@@ -17,10 +17,27 @@ import {
 import { handlePaymentError } from './utils/payment-error.handler';
 import { ConfigService } from '@nestjs/config';
 
+interface CachedToken {
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt: number;
+}
+
 @Injectable()
 export class PaymentService {
   private readonly client: AxiosInstance;
+  private readonly baseUrl?: string;
   private readonly logger = new Logger(PaymentService.name);
+
+  // Paylov OAuth2 credentials (developer.paylov.uz/subscribe/authorization).
+  private readonly consumerKey?: string;
+  private readonly consumerSecret?: string;
+  private readonly merchantUser?: string;
+  private readonly merchantPass?: string;
+  private cachedToken?: CachedToken;
+  private tokenInFlight?: Promise<string>;
+
+  // Inbound callback (Paylov→us) Basic Auth.
   private readonly callbackUsername?: string;
   private readonly callbackPassword?: string;
 
@@ -31,54 +48,139 @@ export class PaymentService {
     private readonly txRepository: Repository<PaymentTransaction>,
     private readonly configService: ConfigService,
   ) {
-    const baseUrl = this.configService.get<string>('PAYLOV_BASE_URL');
-    const token = this.configService.get<string>('PAYLOV_TOKEN');
-    const merchantId = this.configService.get<string>('PAYLOV_MERCHANT_ID');
+    this.baseUrl = this.configService.get<string>('PAYLOV_BASE_URL');
+    this.consumerKey = this.configService.get<string>('PAYLOV_CONSUMER_KEY');
+    this.consumerSecret = this.configService.get<string>('PAYLOV_CONSUMER_SECRET');
+    this.merchantUser = this.configService.get<string>('PAYLOV_USERNAME');
+    this.merchantPass = this.configService.get<string>('PAYLOV_PASSWORD');
     this.callbackUsername = this.configService.get<string>('PAYLOV_CALLBACK_USERNAME');
     this.callbackPassword = this.configService.get<string>('PAYLOV_CALLBACK_PASSWORD');
 
-    if (!baseUrl || !token || !merchantId) {
+    if (!this.baseUrl) {
+      this.logger.warn('PAYLOV_BASE_URL yo\'q.');
+    }
+    if (
+      !this.consumerKey ||
+      !this.consumerSecret ||
+      !this.merchantUser ||
+      !this.merchantPass
+    ) {
       this.logger.warn(
-        'PAYLOV_BASE_URL / PAYLOV_TOKEN / PAYLOV_MERCHANT_ID env yo\'q. To\'lov so\'rovlari ishlamaydi.',
+        'PAYLOV_CONSUMER_KEY/SECRET/USERNAME/PASSWORD yo\'q. Paylov so\'rovlari ishlamaydi.',
       );
     }
 
     this.client = axios.create({
-      baseURL: baseUrl,
+      baseURL: this.baseUrl,
       timeout: 15_000,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Merchant-Id': merchantId ?? '',
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
     });
+
+    // Har bir outbound so'rov oldidan amal qiluvchi Bearer tokenni qo'shadi.
+    this.client.interceptors.request.use(async (config) => {
+      const token = await this.getAccessToken();
+      config.headers = config.headers ?? {};
+      (config.headers as any)['Authorization'] = `Bearer ${token}`;
+      return config;
+    });
+  }
+
+  // ─── OAuth2 ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Paylov OAuth2 password grant: consumer_key/secret bilan Basic Auth orqali
+   * username/password yuboriladi, javobida access_token (1 soat) qaytadi.
+   * Token muddatdan 60 soniya oldin qayta olinadi. Parallel chaqiruvlar bitta
+   * tokenPromise'ga jamlanadi.
+   */
+  private async getAccessToken(): Promise<string> {
+    const now = Date.now();
+    if (this.cachedToken && this.cachedToken.expiresAt - 60_000 > now) {
+      return this.cachedToken.accessToken;
+    }
+    if (this.tokenInFlight) return this.tokenInFlight;
+
+    if (
+      !this.baseUrl ||
+      !this.consumerKey ||
+      !this.consumerSecret ||
+      !this.merchantUser ||
+      !this.merchantPass
+    ) {
+      throw new Error('Paylov OAuth2 credentials sozlanmagan');
+    }
+
+    const basic = Buffer.from(
+      `${this.consumerKey}:${this.consumerSecret}`,
+    ).toString('base64');
+    const url = `${this.baseUrl}/merchant/oauth2/token/`;
+
+    this.tokenInFlight = (async () => {
+      try {
+        const { data } = await axios.post(
+          url,
+          {
+            grant_type: 'password',
+            username: this.merchantUser,
+            password: this.merchantPass,
+          },
+          {
+            headers: {
+              Authorization: `Basic ${basic}`,
+              'Content-Type': 'application/json',
+            },
+            timeout: 15_000,
+          },
+        );
+
+        if (!data?.access_token) {
+          throw new Error(
+            `Paylov token endpoint kutilgan javob bermadi: ${JSON.stringify(data)}`,
+          );
+        }
+
+        const ttlSec = Number(data.expires_in ?? 3600);
+        this.cachedToken = {
+          accessToken: data.access_token,
+          refreshToken: data.refresh_token,
+          expiresAt: Date.now() + ttlSec * 1000,
+        };
+        return data.access_token as string;
+      } finally {
+        this.tokenInFlight = undefined;
+      }
+    })();
+
+    return this.tokenInFlight;
   }
 
   // ─── HELPERS ────────────────────────────────────────────────────────────────
 
   /**
-   * Paylov so'm emas, tiyin (1 so'm = 100 tiyin) kutadi. Float xatolaridan
-   * qochish uchun stringga o'girib, * 100 qilamiz.
+   * 1 so'm = 100 tiyin. A2C va p2p endpointlar tiyin'da. /payment/hold/* docs
+   * "1000 = 1000 SUM" deydi, lekin amaliyotda boshqa Paylov endpointlari tiyin
+   * ishlatadi. Hozircha tiyin'da yuboramiz; agar sandbox'da hold xato bersa
+   * (masalan, "amount too high"), holdSendsSum=true qilib so'mga o'tkazamiz.
    */
-  private toTiyin(sumOrAlready: number, alreadyTiyin = false): number {
-    if (alreadyTiyin) return Math.round(sumOrAlready);
-    if (!Number.isFinite(sumOrAlready) || sumOrAlready < 0) {
+  private toTiyin(amountSum: number): number {
+    if (!Number.isFinite(amountSum) || amountSum < 0) {
       throw new BadRequestException('Noto\'g\'ri summa');
     }
-    // 100 ga ko'paytirib, butun raqamga keltiramiz
-    return Math.round(sumOrAlready * 100);
+    return Math.round(amountSum * 100);
   }
 
-  /**
-   * Bir xil shartnoma + harakat uchun bir xil extId. Retry'da yangi tranzaksiya
-   * yaratilmasligi uchun deterministik kalit.
-   */
-  private buildExtId(contractId: string | number, action: 'hold' | 'payout'): string {
+  /** Idempotency: bir contractId+action kombinatsiyasi bir xil externalId. */
+  private buildExternalId(
+    contractId: string | number,
+    action: 'hold' | 'payout' | 'charge',
+  ): string {
     return `escro_${action}_contract_${contractId}`;
   }
 
-  /** Karta foydalanuvchiga tegishli ekanini tekshiradi. */
-  private async assertCardOwnedByUser(userId: number, cardId: string): Promise<Card> {
+  private async assertCardOwnedByUser(
+    userId: number,
+    cardId: string,
+  ): Promise<Card> {
     const card = await this.cardRepository.findOne({ where: { cardId, userId } });
     if (!card) {
       throw new ForbiddenException('Karta sizga tegishli emas yoki topilmadi');
@@ -89,7 +191,6 @@ export class PaymentService {
     return card;
   }
 
-  /** Audit yozuvini yaratadi yoki extId bo'yicha mavjudini topadi. */
   private async upsertTx(args: {
     type: TransactionType;
     contractId?: number;
@@ -99,7 +200,9 @@ export class PaymentService {
     amountTiyin: number;
   }): Promise<PaymentTransaction> {
     if (args.extId) {
-      const existing = await this.txRepository.findOne({ where: { extId: args.extId } });
+      const existing = await this.txRepository.findOne({
+        where: { extId: args.extId },
+      });
       if (existing) return existing;
     }
     const tx = this.txRepository.create({
@@ -116,7 +219,10 @@ export class PaymentService {
 
   // ─── KARTA AMALLARI ─────────────────────────────────────────────────────────
 
-  /** Karta ulashni boshlash (Paylov OTP yuboradi). */
+  /**
+   * Karta ulashni boshlash. Paylov SMS orqali OTP yuboradi va `result.cid`
+   * qaytaradi — front shu cid'ni `confirmCard`'ga `cardId` sifatida uzatadi.
+   */
   async createCard(
     userId: number | string,
     cardNumber: string,
@@ -129,7 +235,6 @@ export class PaymentService {
       }
 
       const cleanCard = cardNumber.replace(/\s+/g, '');
-      // MM/YY → YYMM
       const parts = expireDate.split('/');
       const formattedExpiry =
         parts.length === 2
@@ -140,12 +245,15 @@ export class PaymentService {
         ? phoneNumber
         : '+' + phoneNumber.replace(/\D/g, '');
 
-      const { data } = await this.client.post('/merchant/userCard/createUserCard/', {
-        userId: String(userId),
-        cardNumber: cleanCard,
-        expireDate: formattedExpiry,
-        phoneNumber: cleanPhone,
-      });
+      const { data } = await this.client.post(
+        '/merchant/userCard/createUserCard/',
+        {
+          userId: String(userId),
+          cardNumber: cleanCard,
+          expireDate: formattedExpiry,
+          phoneNumber: cleanPhone,
+        },
+      );
 
       return data;
     } catch (error) {
@@ -154,7 +262,7 @@ export class PaymentService {
     }
   }
 
-  /** OTP orqali karta ulashni tasdiqlash. */
+  /** OTP orqali kartani tasdiqlash. */
   async confirmCard(
     userId: number,
     cardId: string,
@@ -170,7 +278,9 @@ export class PaymentService {
 
       if (data?.result?.card) {
         const c = data.result.card;
-        const existing = await this.cardRepository.findOne({ where: { cardId: c.cardId } });
+        const existing = await this.cardRepository.findOne({
+          where: { cardId: c.cardId },
+        });
 
         if (existing) {
           await this.cardRepository.update(
@@ -208,15 +318,16 @@ export class PaymentService {
   }
 
   /**
-   * OTP qayta yuborish. Paylov ochiq hujjatida (developer.paylov.uz)
-   * alohida endpoint hujjatlanmagan; quyidagi yo'l konvensiya bo'yicha,
-   * Paylov 404 qaytarsa frontend qayta `createCard` chaqirishi kerak.
+   * OTP qayta yuborish — Paylov ochiq docsida alohida hujjatlanmagan. Agar
+   * Paylov 404 qaytarsa, frontend `createCard`'ni qayta chaqirishi kerak
+   * (yangi `cid` keladi).
    */
   async resendOtp(cardId: string) {
     try {
-      const { data } = await this.client.post('/merchant/userCard/resendOtp/', {
-        cardId,
-      });
+      const { data } = await this.client.post(
+        '/merchant/userCard/resendOtp/',
+        { cardId },
+      );
       return data;
     } catch (error) {
       this.logger.error(`Paylov resendOtp: ${error}`);
@@ -226,14 +337,20 @@ export class PaymentService {
 
   async deleteCard(userId: number, cardId: string) {
     try {
-      const card = await this.cardRepository.findOne({ where: { cardId, userId } });
+      const card = await this.cardRepository.findOne({
+        where: { cardId, userId },
+      });
       if (!card) {
-        return { result: null, error: { code: 'card_not_found', message: 'Karta topilmadi' } };
+        return {
+          result: null,
+          error: { code: 'card_not_found', message: 'Karta topilmadi' },
+        };
       }
 
-      const { data } = await this.client.delete('/merchant/userCard/deleteUserCard/', {
-        params: { userCardId: cardId },
-      });
+      const { data } = await this.client.delete(
+        '/merchant/userCard/deleteUserCard/',
+        { params: { userCardId: cardId } },
+      );
 
       if (data?.result === true) {
         await this.cardRepository.remove(card);
@@ -260,7 +377,9 @@ export class PaymentService {
   async getCardDetails(userId: number, cardId: string) {
     try {
       await this.assertCardOwnedByUser(userId, cardId);
-      const { data } = await this.client.get(`/merchant/userCard/getCard/${cardId}/`);
+      const { data } = await this.client.get(
+        `/merchant/userCard/getCard/${cardId}/`,
+      );
       return data;
     } catch (error) {
       this.logger.error(`Paylov getCardDetails: ${error}`);
@@ -272,7 +391,7 @@ export class PaymentService {
 
   /**
    * Xaridor kartasidagi mablag'ni 28 kungacha muzlatadi.
-   * Idempotent: bir xil contractId uchun bir xil extId yuboriladi.
+   * Idempotent: bir xil contractId uchun bir xil externalId yuboriladi.
    */
   async holdFunds(
     userId: number,
@@ -284,21 +403,24 @@ export class PaymentService {
       await this.assertCardOwnedByUser(userId, cardId);
 
       const amountTiyin = this.toTiyin(amountSum);
-      const extId = this.buildExtId(contractId, 'hold');
+      const externalId = this.buildExternalId(contractId, 'hold');
 
       const tx = await this.upsertTx({
         type: TransactionType.HOLD,
-        contractId: typeof contractId === 'number' ? contractId : Number(contractId),
+        contractId:
+          typeof contractId === 'number' ? contractId : Number(contractId),
         userId,
         cardId,
-        extId,
+        extId: externalId,
         amountTiyin,
       });
 
-      // Agar oldindan muvaffaqiyatli muzlatilgan bo'lsa, qaytaramiz
       if (tx.status === TransactionStatus.HELD && tx.paylovTransactionId) {
         return {
-          result: { transactionId: tx.paylovTransactionId, alreadyHeld: true },
+          result: {
+            transactionId: tx.paylovTransactionId,
+            alreadyHeld: true,
+          },
           error: null,
         };
       }
@@ -308,8 +430,7 @@ export class PaymentService {
         cardId,
         amount: amountTiyin,
         time: 40320, // 28 kun (daqiqada)
-        description: `Escrow Contract #${contractId}`,
-        extId,
+        externalId,
       });
 
       tx.rawResponse = data;
@@ -330,24 +451,25 @@ export class PaymentService {
   }
 
   /**
-   * Muzlatilgan pulni merchant hisobiga o'tkazish (Paylov tilida "charge").
-   * E'tibor: bu yerda pul ijrochiga emas, merchant hisobiga tushadi.
-   * Ijrochiga o'tkazish uchun keyin `payoutToCard` chaqirilishi kerak.
+   * Muzlatilgan pulni merchant hisobiga charge qiladi. Ijrochiga o'tkazish
+   * uchun keyin `payoutToCard` chaqiriladi.
    */
   async fulfillEscrow(transactionId: string, amountSum: number) {
     try {
       const amountTiyin = this.toTiyin(amountSum);
 
-      // Audit: charge harakatini yozamiz
-      let tx = await this.txRepository.findOne({
-        where: { paylovTransactionId: transactionId, type: TransactionType.HOLD },
+      const holdTx = await this.txRepository.findOne({
+        where: {
+          paylovTransactionId: transactionId,
+          type: TransactionType.HOLD,
+        },
       });
       const chargeAuditExtId = `escro_charge_${transactionId}`;
       const chargeTx = await this.upsertTx({
         type: TransactionType.CHARGE,
-        contractId: tx?.contractId,
-        userId: tx?.userId,
-        cardId: tx?.cardId,
+        contractId: holdTx?.contractId,
+        userId: holdTx?.userId,
+        cardId: holdTx?.cardId,
         extId: chargeAuditExtId,
         amountTiyin,
       });
@@ -360,9 +482,9 @@ export class PaymentService {
       chargeTx.rawResponse = data;
       if (data?.result) {
         chargeTx.status = TransactionStatus.CHARGED;
-        if (tx) {
-          tx.status = TransactionStatus.CHARGED;
-          await this.txRepository.save(tx);
+        if (holdTx) {
+          holdTx.status = TransactionStatus.CHARGED;
+          await this.txRepository.save(holdTx);
         }
       } else {
         chargeTx.status = TransactionStatus.FAILED;
@@ -377,14 +499,19 @@ export class PaymentService {
     }
   }
 
-  /** Muzlatishni bekor qilish (xaridorga pul qaytariladi). */
+  /** Hold'ni dismiss qilish — xaridorga pul qaytariladi. */
   async cancelHold(transactionId: string) {
     try {
       const tx = await this.txRepository.findOne({
-        where: { paylovTransactionId: transactionId, type: TransactionType.HOLD },
+        where: {
+          paylovTransactionId: transactionId,
+          type: TransactionType.HOLD,
+        },
       });
 
-      const { data } = await this.client.post('/payment/hold/dismiss/', { transactionId });
+      const { data } = await this.client.post('/payment/hold/dismiss/', {
+        transactionId,
+      });
 
       if (tx) {
         tx.status = data?.result
@@ -403,40 +530,70 @@ export class PaymentService {
   }
 
   /**
-   * Merchant hisobidan ijrochi (sotuvchi) kartasiga P2P o'tkazma.
-   * Paylov hujjati (developer.paylov.uz/subscribe/p2p-transfer) bo'yicha
-   * `/merchant/p2p/transfer/create/`, qabul qiluvchi karta `cardNumber`
-   * (raqam yoki Paylov tokeni) sifatida uzatiladi.
+   * Merchant hisobidan ijrochi (sotuvchi) kartasiga A2C (Account-to-Card)
+   * o'tkazmasi. developer.paylov.uz/a2c bo'yicha:
+   *   POST /merchant/a2c/performTransaction
+   *   body: { userId, cardId, amountInTiyin, externalId }
    */
-  async payoutToCard(toCardId: string, amountSum: number, contractId: string | number) {
+  async payoutToCard(
+    toCardId: string,
+    amountSum: number,
+    contractId: string | number,
+  ) {
     try {
       const amountTiyin = this.toTiyin(amountSum);
-      const extId = this.buildExtId(contractId, 'payout');
+      const externalId = this.buildExternalId(contractId, 'payout');
+
+      // Karta egasini topamiz — A2C body'siga `userId` kerak.
+      const card = await this.cardRepository.findOne({
+        where: { cardId: toCardId },
+      });
+      if (!card) {
+        return {
+          result: null,
+          error: {
+            code: 'card_not_found',
+            message: 'Payout karta bizning ma\'lumotlar bazamizda topilmadi',
+          },
+        };
+      }
 
       const tx = await this.upsertTx({
         type: TransactionType.PAYOUT,
-        contractId: typeof contractId === 'number' ? contractId : Number(contractId),
+        contractId:
+          typeof contractId === 'number' ? contractId : Number(contractId),
+        userId: card.userId,
         cardId: toCardId,
-        extId,
+        extId: externalId,
         amountTiyin,
       });
 
       if (tx.status === TransactionStatus.PAID_OUT && tx.paylovTransactionId) {
         return {
-          result: { transactionId: tx.paylovTransactionId, alreadyPaid: true },
+          result: {
+            transactionId: tx.paylovTransactionId,
+            alreadyPaid: true,
+          },
           error: null,
         };
       }
 
-      const { data } = await this.client.post('/merchant/p2p/transfer/create/', {
-        cardNumber: toCardId,
-        amount: amountTiyin,
-        externalId: extId,
-      });
+      const { data } = await this.client.post(
+        '/merchant/a2c/performTransaction',
+        {
+          userId: String(card.userId),
+          cardId: toCardId,
+          amountInTiyin: amountTiyin,
+          externalId,
+        },
+      );
 
       tx.rawResponse = data;
-      if (data?.result?.transactionId) {
-        tx.paylovTransactionId = data.result.transactionId;
+      // A2C javobi `result` bilan o'ralmasligi mumkin (docs ga ko'ra:
+      // {transactionId, status, statusText}). Ikki shaklni ham qabul qilamiz.
+      const txId = data?.result?.transactionId ?? data?.transactionId;
+      if (txId) {
+        tx.paylovTransactionId = String(txId);
         tx.status = TransactionStatus.PAID_OUT;
       } else {
         tx.status = TransactionStatus.FAILED;
@@ -451,21 +608,40 @@ export class PaymentService {
     }
   }
 
-  /** Reconciliation: Paylov'dagi tranzaksiyaning hozirgi holatini so'raydi.
-   * Hujjat: developer.paylov.uz/subscribe/hold-payment — hold status. */
+  /**
+   * Tranzaksiya holatini Paylov tomondan so'raydi. Tip bo'yicha alohida
+   * endpoint:
+   *   HOLD/CHARGE  → GET /merchant/payment/hold/status/?transactionId=...
+   *   PAYOUT       → GET /merchant/a2c/checkTransaction/{transactionId}
+   */
   async getTransactionStatus(transactionId: string) {
     try {
-      const { data } = await this.client.get('/merchant/payment/hold/status/', {
-        params: { transactionId },
-      });
-
       const tx = await this.txRepository.findOne({
         where: { paylovTransactionId: transactionId },
       });
-      if (tx && data?.result?.state) {
+
+      let data: any;
+      if (tx?.type === TransactionType.PAYOUT) {
+        const res = await this.client.get(
+          `/merchant/a2c/checkTransaction/${transactionId}`,
+        );
+        data = res.data;
+      } else {
+        const res = await this.client.get(
+          '/merchant/payment/hold/status/',
+          { params: { transactionId } },
+        );
+        data = res.data;
+      }
+
+      if (tx) {
         tx.rawResponse = data;
-        const next = this.mapPaylovStateToStatus(data.result.state);
-        if (next) tx.status = next;
+        const stateRaw =
+          data?.result?.status ?? data?.result?.state ?? data?.status;
+        if (stateRaw) {
+          const next = this.mapPaylovStateToStatus(String(stateRaw));
+          if (next) tx.status = next;
+        }
         await this.txRepository.save(tx);
       }
 
@@ -476,20 +652,16 @@ export class PaymentService {
     }
   }
 
-  // ─── WEBHOOK ────────────────────────────────────────────────────────────────
+  // ─── WEBHOOK (Paylov → biz) ─────────────────────────────────────────────────
 
   /**
-   * Paylov callback'ini HTTP Basic Auth orqali tekshiradi. Paylov rasmiy
-   * docsiga ko'ra (developer.paylov.uz/merchant-configuration) merchant
-   * kabinetida "Callback Auth username" va "Callback Auth password"
-   * o'rnatiladi va Paylov har bir callback so'rovida ularni Basic Auth
-   * sifatida yuboradi.
+   * Paylov callback'ini HTTP Basic Auth orqali tekshiradi. Paylov merchant
+   * kabinetida "Callback Auth username/password" o'rnatiladi va Paylov har
+   * bir callback so'rovida ularni `Authorization: Basic ...` sifatida
+   * yuboradi. (developer.paylov.uz/merchants/paylov-payment-gateway)
    */
   verifyWebhookBasicAuth(authHeader?: string): boolean {
     if (!this.callbackUsername || !this.callbackPassword) {
-      // Sozlanmagan — production'da bu false qaytarish kerak. Hozircha
-      // o'tkazib yuboriladi (warning bilan), Paylov dashboardida sozlangach
-      // tekshiruv ishlay boshlaydi.
       this.logger.warn(
         'PAYLOV_CALLBACK_USERNAME/PASSWORD sozlanmagan, Basic Auth tekshiruvi o\'tkazib yuborildi',
       );
@@ -499,7 +671,9 @@ export class PaymentService {
 
     const expected =
       'Basic ' +
-      Buffer.from(`${this.callbackUsername}:${this.callbackPassword}`).toString('base64');
+      Buffer.from(
+        `${this.callbackUsername}:${this.callbackPassword}`,
+      ).toString('base64');
 
     try {
       const a = Buffer.from(authHeader);
@@ -511,62 +685,130 @@ export class PaymentService {
   }
 
   /**
-   * Paylov yuborgan callback'ni qayta ishlash. Agar tranzaksiya holati
-   * o'zgargan bo'lsa, audit jadvalini yangilaymiz.
+   * Paylov JSON-RPC 2.0 callback. Asosiy metodlar:
+   *   transaction.check    — Paylov so'raydi: shu account/amount uchun tranzaksiya
+   *                          o'tkazsa bo'ladimi? (validate qilamiz)
+   *   transaction.perform  — Paylov xabar beradi: tranzaksiya muvaffaqiyatli
+   *                          o'tkazildi (audit jadvalini yangilaymiz)
+   * Statuslar string sifatida qaytariladi: "0" = OK, "303" = order not found,
+   * "+1" = custom error message (statusText'da).
+   * (developer.paylov.uz/merchants/transaction-check, /transaction-perform,
+   *  /merchants/statuses)
    */
   async handlePaylovCallback(payload: any) {
-    const transactionId: string | undefined =
-      payload?.transactionId ?? payload?.params?.transactionId ?? payload?.result?.transactionId;
-    const state: string | undefined =
-      payload?.state ?? payload?.params?.state ?? payload?.result?.state;
-    const cancelled: boolean | undefined = payload?.cancelled === true;
+    const id = payload?.id ?? null;
+    const method: string | undefined = payload?.method;
+    const params = payload?.params ?? {};
 
     this.logger.log(
-      `Paylov callback: tx=${transactionId} state=${state} cancelled=${cancelled}`,
+      `Paylov callback: method=${method} id=${id} params=${JSON.stringify(params).slice(0, 300)}`,
     );
 
-    if (!transactionId) {
-      return { result: { acknowledged: true, ignored: 'no_transaction_id' } };
-    }
-
-    const tx = await this.txRepository.findOne({
-      where: { paylovTransactionId: transactionId },
+    const ok = (extra?: Record<string, any>) => ({
+      jsonrpc: '2.0',
+      id,
+      result: { status: '0', statusText: 'OK', ...(extra ?? {}) },
+    });
+    const err = (status: string, statusText: string) => ({
+      jsonrpc: '2.0',
+      id,
+      result: { status, statusText },
     });
 
-    if (!tx) {
-      this.logger.warn(`Callback for unknown tx ${transactionId}`);
-      return { result: { acknowledged: true, ignored: 'unknown_tx' } };
+    try {
+      if (method === 'transaction.check') {
+        // Bizning escrov flowda Paylov bu metodni cheklangan holatda chaqiradi.
+        // Account ichida `contractId` bo'lishi kutiladi. Mos shartnoma topilsa,
+        // statusni `0` qaytaramiz, aks holda `303` (order not found).
+        const account = params?.account ?? {};
+        const contractIdRaw = account?.contractId ?? account?.order_id;
+        const contractId = contractIdRaw != null ? Number(contractIdRaw) : NaN;
+        if (!Number.isFinite(contractId)) {
+          return err('303', 'Order not found');
+        }
+        const exists = await this.txRepository.findOne({
+          where: { contractId },
+        });
+        return exists ? ok() : err('303', 'Order not found');
+      }
+
+      if (method === 'transaction.perform') {
+        const txId: string | undefined =
+          params?.transaction_id ?? params?.transactionId;
+        if (!txId) return err('+1', 'transaction_id missing');
+
+        const tx = await this.txRepository.findOne({
+          where: { paylovTransactionId: txId },
+        });
+        if (!tx) {
+          // Ehtimol callback hold yaratilishidan oldin keldi — silently OK.
+          this.logger.warn(`transaction.perform unknown tx ${txId}`);
+          return ok();
+        }
+        tx.rawResponse = payload;
+        tx.status = TransactionStatus.CHARGED;
+        await this.txRepository.save(tx);
+        return ok();
+      }
+
+      // Boshqa metodlar (rasmiy docsda yo'q, lekin Paylov yuborgan bo'lsa
+      // status update sifatida qabul qilamiz).
+      const txId =
+        params?.transaction_id ??
+        params?.transactionId ??
+        payload?.transactionId;
+      if (txId) {
+        const tx = await this.txRepository.findOne({
+          where: { paylovTransactionId: String(txId) },
+        });
+        if (tx) {
+          tx.rawResponse = payload;
+          const stateRaw =
+            params?.state ?? params?.status ?? payload?.state ?? payload?.status;
+          if (params?.cancelled === true) {
+            tx.status = TransactionStatus.DISMISSED;
+          } else if (stateRaw) {
+            const mapped = this.mapPaylovStateToStatus(String(stateRaw));
+            if (mapped) tx.status = mapped;
+          }
+          await this.txRepository.save(tx);
+        }
+      }
+
+      // Notanish metod — Paylov retry qilmasligi uchun OK.
+      return ok();
+    } catch (e) {
+      this.logger.error(`Callback handler error: ${e}`);
+      return err('+1', 'Internal error');
     }
-
-    tx.rawResponse = payload;
-
-    if (cancelled) {
-      tx.status = TransactionStatus.DISMISSED;
-    } else if (state) {
-      const mapped = this.mapPaylovStateToStatus(state);
-      if (mapped) tx.status = mapped;
-    }
-
-    await this.txRepository.save(tx);
-    return { result: { acknowledged: true } };
   }
 
   /** Paylov state stringlarini bizning enum'imizga o'tkazadi. */
   private mapPaylovStateToStatus(state: string): TransactionStatus | null {
     const s = String(state).toLowerCase();
-    if (s.includes('held') || s === '1' || s === 'hold') return TransactionStatus.HELD;
-    if (s.includes('charge') || s === '2' || s === 'completed') return TransactionStatus.CHARGED;
+    if (s === '0' || s === 'ok' || s === 'paid' || s === 'success') {
+      return TransactionStatus.CHARGED;
+    }
+    if (s.includes('held') || s === '1' || s === 'hold' || s === 'created') {
+      return TransactionStatus.HELD;
+    }
+    if (s.includes('charge') || s === '2' || s === 'completed') {
+      return TransactionStatus.CHARGED;
+    }
     if (s.includes('dismiss') || s === '-1' || s === 'cancelled') {
       return TransactionStatus.DISMISSED;
     }
-    if (s.includes('payout') || s === 'paid') return TransactionStatus.PAID_OUT;
-    if (s.includes('fail') || s.includes('error')) return TransactionStatus.FAILED;
+    if (s.includes('payout') || s === 'paid_out') {
+      return TransactionStatus.PAID_OUT;
+    }
+    if (s.includes('fail') || s.includes('error')) {
+      return TransactionStatus.FAILED;
+    }
     return null;
   }
 
-  // ─── ADMIN / RECONCILIATION YORDAMCHI ───────────────────────────────────────
+  // ─── ADMIN / RECONCILIATION ─────────────────────────────────────────────────
 
-  /** Shartnoma bo'yicha barcha tranzaksiyalarni qaytaradi (audit uchun). */
   async getTransactionsByContract(contractId: number) {
     return this.txRepository.find({
       where: { contractId },
