@@ -208,12 +208,12 @@ export class PaymentService {
   }
 
   /**
-   * OTP qayta yuborish. Paylov hujjatida aniq path nomi: `resendOtp` yoki
-   * `resendUserCardOtp`. TODO: aniq endpoint nomini tekshirish kerak.
+   * OTP qayta yuborish. Paylov ochiq hujjatida (developer.paylov.uz)
+   * alohida endpoint hujjatlanmagan; quyidagi yo'l konvensiya bo'yicha,
+   * Paylov 404 qaytarsa frontend qayta `createCard` chaqirishi kerak.
    */
   async resendOtp(cardId: string) {
     try {
-      // TODO: verify against developer.paylov.uz docs
       const { data } = await this.client.post('/merchant/userCard/resendOtp/', {
         cardId,
       });
@@ -403,9 +403,10 @@ export class PaymentService {
   }
 
   /**
-   * Merchant hisobidan ijrochi (sotuvchi) kartasiga o'tkazma (P2P payout).
-   * TODO: Paylov hujjatida aniq endpoint nomini tasdiqlash. Quyidagi yo'l
-   * konvensiya bo'yicha taxmin qilingan.
+   * Merchant hisobidan ijrochi (sotuvchi) kartasiga P2P o'tkazma.
+   * Paylov hujjati (developer.paylov.uz/subscribe/p2p-transfer) bo'yicha
+   * `/merchant/p2p/transfer/create/`, qabul qiluvchi karta `cardNumber`
+   * (raqam yoki Paylov tokeni) sifatida uzatiladi.
    */
   async payoutToCard(toCardId: string, amountSum: number, contractId: string | number) {
     try {
@@ -427,13 +428,10 @@ export class PaymentService {
         };
       }
 
-      // TODO: verify against developer.paylov.uz docs — endpoint may be
-      // `/payment/payout/create/` or `/merchant/payout/create/` depending on tier.
-      const { data } = await this.client.post('/payment/payout/create/', {
-        toCardId,
+      const { data } = await this.client.post('/merchant/p2p/transfer/create/', {
+        cardNumber: toCardId,
         amount: amountTiyin,
-        extId,
-        description: `Escrow payout for Contract #${contractId}`,
+        externalId: extId,
       });
 
       tx.rawResponse = data;
@@ -453,11 +451,13 @@ export class PaymentService {
     }
   }
 
-  /** Reconciliation: Paylov'dagi tranzaksiyaning hozirgi holatini so'raydi. */
+  /** Reconciliation: Paylov'dagi tranzaksiyaning hozirgi holatini so'raydi.
+   * Hujjat: developer.paylov.uz/subscribe/hold-payment — hold status. */
   async getTransactionStatus(transactionId: string) {
     try {
-      // TODO: verify path — could be `/payment/hold/{id}/` or `/payment/transaction/{id}/`
-      const { data } = await this.client.get(`/payment/transaction/${transactionId}/`);
+      const { data } = await this.client.get('/merchant/payment/hold/status/', {
+        params: { transactionId },
+      });
 
       const tx = await this.txRepository.findOne({
         where: { paylovTransactionId: transactionId },
