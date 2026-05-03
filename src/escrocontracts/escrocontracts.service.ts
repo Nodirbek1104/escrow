@@ -111,23 +111,31 @@ export class EscrocontractsService {
 
         // To'lovni muzlatish (Hold) jarayoni
         const holdResult = await this.paymentService.holdFunds(
-          user.userId, 
-          data.cardId, 
-          contract.amount, 
-          contract.id.toString()
+          user.userId,
+          data.cardId,
+          contract.amount,
+          contract.id.toString(),
         );
 
-        if (holdResult.result?.transactionId) {
+        if (holdResult?.result?.transactionId) {
           contract.transactionId = holdResult.result.transactionId;
           contract.senderCardId = data.cardId;
           contract.status = EscrowStatus.PAYMENT_HELD; // Avtomatik HELD holatiga o'tadi
         } else {
-          throw new BadRequestException('Kartada mablag‘ yetarli emas yoki hold jarayonida xatolik!');
+          const errMsg = holdResult?.error?.message || 'Kartada mablag\'ni muzlatishda xatolik';
+          this.logger.error(`Hold failed for contract ${contract.id}: ${JSON.stringify(holdResult?.error)}`);
+          throw new BadRequestException(errMsg);
         }
       } else if (status === EscrowStatus.ACCEPTED) {
         // Agar ijrochi (sotuvchi) qabul qilayotgan bo'lsa
         if (!data?.cardId) {
           throw new BadRequestException('Shartnomani qabul qilish uchun pul tushadigan kartangizni tanlang!');
+        }
+        // Karta ijrochiga tegishli ekanligini tekshiramiz (PaymentService ichida)
+        const myCards = await this.paymentService.getMyCards(user.userId);
+        const ownsCard = myCards.some((c: any) => c.cardId === data.cardId);
+        if (!ownsCard) {
+          throw new ForbiddenException('Tanlangan karta sizga tegishli emas');
         }
         contract.receiverCardId = data.cardId;
         contract.status = EscrowStatus.ACCEPTED;
@@ -137,11 +145,45 @@ export class EscrocontractsService {
       if (status === EscrowStatus.COMPLETED) {
         const isAdmin = user.role === 'admin' || user.role === 'super_admin';
         if (!isAdmin && contract.creatorId !== user.userId) {
-          throw new ForbiddenException('Faqat ijrochi yoki Admin yopishi mumkin');
+          throw new ForbiddenException('Faqat xaridor yoki Admin yopishi mumkin');
         }
-        
-        const res = await this.paymentService.fulfillEscrow(contract.transactionId!, contract.amount);
-        if (!res.result) throw new BadRequestException('To‘lovni amalga oshirishda xatolik');
+        if (!contract.transactionId) {
+          throw new BadRequestException('Bu shartnomada muzlatilgan tranzaksiya yo\'q');
+        }
+        if (!contract.receiverCardId) {
+          throw new BadRequestException('Ijrochining kartasi belgilanmagan, payout amalga oshmaydi');
+        }
+
+        // 1) Hold'ni merchant hisobiga charge qilamiz
+        const chargeRes = await this.paymentService.fulfillEscrow(
+          contract.transactionId,
+          contract.amount,
+        );
+        if (!chargeRes?.result) {
+          const errMsg = chargeRes?.error?.message || 'To\'lovni amalga oshirishda xatolik';
+          throw new BadRequestException(errMsg);
+        }
+
+        // 2) Merchant hisobidan ijrochi kartasiga payout
+        const payoutRes = await this.paymentService.payoutToCard(
+          contract.receiverCardId,
+          contract.amount,
+          contract.id.toString(),
+        );
+        if (!payoutRes?.result) {
+          const errMsg =
+            payoutRes?.error?.message ||
+            'Charge muvaffaqiyatli, lekin ijrochiga payout amalga oshmadi. Admin aralashishi kerak.';
+          this.logger.error(
+            `Payout failed for contract ${contract.id}: ${JSON.stringify(payoutRes?.error)}`,
+          );
+          // Shartnomani DISPUTED'ga o'tkazamiz va admin ko'rib chiqsin
+          contract.status = EscrowStatus.DISPUTED;
+          contract.rejectionReason = `Payout xatosi: ${errMsg}`;
+          await this.contractRepo.save(contract);
+          throw new BadRequestException(errMsg);
+        }
+
         contract.status = EscrowStatus.COMPLETED;
       }
 
