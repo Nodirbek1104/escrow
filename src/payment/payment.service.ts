@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { createHmac, timingSafeEqual } from 'crypto';
+import { timingSafeEqual } from 'crypto';
 import axios, { AxiosInstance } from 'axios';
 import { Card } from './entities/payment.entity';
 import {
@@ -21,7 +21,8 @@ import { ConfigService } from '@nestjs/config';
 export class PaymentService {
   private readonly client: AxiosInstance;
   private readonly logger = new Logger(PaymentService.name);
-  private readonly webhookSecret?: string;
+  private readonly callbackUsername?: string;
+  private readonly callbackPassword?: string;
 
   constructor(
     @InjectRepository(Card)
@@ -33,7 +34,8 @@ export class PaymentService {
     const baseUrl = this.configService.get<string>('PAYLOV_BASE_URL');
     const token = this.configService.get<string>('PAYLOV_TOKEN');
     const merchantId = this.configService.get<string>('PAYLOV_MERCHANT_ID');
-    this.webhookSecret = this.configService.get<string>('PAYLOV_WEBHOOK_SECRET');
+    this.callbackUsername = this.configService.get<string>('PAYLOV_CALLBACK_USERNAME');
+    this.callbackPassword = this.configService.get<string>('PAYLOV_CALLBACK_PASSWORD');
 
     if (!baseUrl || !token || !merchantId) {
       this.logger.warn(
@@ -477,25 +479,31 @@ export class PaymentService {
   // ─── WEBHOOK ────────────────────────────────────────────────────────────────
 
   /**
-   * Paylov callback'ini imzo orqali tekshiradi. Imzo PAYLOV_WEBHOOK_SECRET
-   * env'i orqali sozlanadi. Aniq imzolash sxemasi (HMAC-SHA256, header nomi
-   * va h.k.) docs.paylov.uz dan tasdiqlanishi kerak.
+   * Paylov callback'ini HTTP Basic Auth orqali tekshiradi. Paylov rasmiy
+   * docsiga ko'ra (developer.paylov.uz/merchant-configuration) merchant
+   * kabinetida "Callback Auth username" va "Callback Auth password"
+   * o'rnatiladi va Paylov har bir callback so'rovida ularni Basic Auth
+   * sifatida yuboradi.
    */
-  verifyWebhookSignature(rawBody: string, signature?: string): boolean {
-    if (!this.webhookSecret) {
-      // Secret sozlanmagan — production'da bu false qaytarish kerak.
-      this.logger.warn('PAYLOV_WEBHOOK_SECRET sozlanmagan, signature tekshiruvi o\'tkazib yuborildi');
+  verifyWebhookBasicAuth(authHeader?: string): boolean {
+    if (!this.callbackUsername || !this.callbackPassword) {
+      // Sozlanmagan — production'da bu false qaytarish kerak. Hozircha
+      // o'tkazib yuboriladi (warning bilan), Paylov dashboardida sozlangach
+      // tekshiruv ishlay boshlaydi.
+      this.logger.warn(
+        'PAYLOV_CALLBACK_USERNAME/PASSWORD sozlanmagan, Basic Auth tekshiruvi o\'tkazib yuborildi',
+      );
       return true;
     }
-    if (!signature) return false;
+    if (!authHeader || !authHeader.toLowerCase().startsWith('basic ')) return false;
 
-    const expected = createHmac('sha256', this.webhookSecret)
-      .update(rawBody)
-      .digest('hex');
+    const expected =
+      'Basic ' +
+      Buffer.from(`${this.callbackUsername}:${this.callbackPassword}`).toString('base64');
 
     try {
-      const a = Buffer.from(expected);
-      const b = Buffer.from(signature);
+      const a = Buffer.from(authHeader);
+      const b = Buffer.from(expected);
       return a.length === b.length && timingSafeEqual(a, b);
     } catch {
       return false;

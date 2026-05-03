@@ -14,8 +14,6 @@ import {
   Headers,
   ParseIntPipe,
 } from '@nestjs/common';
-import type { RawBodyRequest } from '@nestjs/common';
-import type { Request } from 'express';
 import { PaymentService } from './payment.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AdminGuard } from '../auth/guards/admin.guard';
@@ -144,29 +142,22 @@ export class PaymentController {
   // ─── PAYLOV WEBHOOK (ochiq endpoint) ─────────────────────────────────────────
 
   /**
-   * Paylov tomonidan yuboriladigan callback. Auth talab qilinmaydi, lekin
-   * imzo (HMAC-SHA256) PAYLOV_WEBHOOK_SECRET orqali tekshiriladi.
-   *
-   * Header nomi va imzolash sxemasi docs.paylov.uz da tasdiqlanishi kerak.
-   * Hozircha `X-Paylov-Signature` (yoki `paylov-signature`) header'i kutiladi.
+   * Paylov tomonidan yuboriladigan callback. Paylov rasmiy docsiga ko'ra
+   * autentifikatsiya HTTP Basic Auth orqali amalga oshiriladi:
+   * Authorization: Basic base64(PAYLOV_CALLBACK_USERNAME:PAYLOV_CALLBACK_PASSWORD).
+   * Username/password Paylov merchant kabinetida sozlanadi va serverda env
+   * sifatida saqlanadi.
    */
   @Post('paylov/callback')
   @HttpCode(HttpStatus.OK)
   async paylovCallback(
-    @Req() req: RawBodyRequest<Request>,
-    @Headers('x-paylov-signature') sigHeader1: string | undefined,
-    @Headers('paylov-signature') sigHeader2: string | undefined,
+    @Headers('authorization') authHeader: string | undefined,
     @Body() body: any,
   ) {
-    const signature = sigHeader1 || sigHeader2;
-    const rawBody = req.rawBody?.toString('utf8') ?? JSON.stringify(body);
-
-    const ok = this.paymentService.verifyWebhookSignature(rawBody, signature);
+    const ok = this.paymentService.verifyWebhookBasicAuth(authHeader);
     if (!ok) {
-      this.logger.warn('Paylov webhook: signature mismatch');
-      // Paylov ko'p hollarda 200 kutadi, aks holda retry qiladi.
-      // Lekin noto'g'ri imzoda 401 qaytarish to'g'ri xatti-harakat.
-      throw new UnauthorizedException('Invalid signature');
+      this.logger.warn('Paylov webhook: invalid Basic Auth credentials');
+      throw new UnauthorizedException('Invalid credentials');
     }
 
     return this.paymentService.handlePaylovCallback(body);
