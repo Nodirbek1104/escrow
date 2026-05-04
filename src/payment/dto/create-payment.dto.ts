@@ -42,7 +42,7 @@ export class ConfirmCardDto {
 
   @IsString()
   @IsNotEmpty({ message: 'OTP kodni kiriting' })
-  @Matches(/^\d{4,8}$/, { message: 'OTP faqat raqamlardan iborat bo\'lishi kerak' })
+  @Matches(/^[A-Za-z0-9]{4,8}$/, { message: 'OTP 4-8 ta harf yoki raqamdan iborat bo\'lishi kerak' })
   otp!: string;
 
   @IsString()

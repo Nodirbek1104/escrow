@@ -11,28 +11,36 @@ export class SmsService {
     @InjectRedis() private readonly redis: Redis,
   ) {}
 
-  private async getEskizToken(): Promise<string> {
-    const cached = await this.redis.get('eskiz_token');
-    if (cached) return cached;
+  private async getEskizToken(forceRefresh = false): Promise<string> {
+    if (!forceRefresh) {
+      const cached = await this.redis.get('eskiz_token');
+      if (cached) return cached;
+    }
+
+    const email = process.env.ESKIZ_EMAIL;
+    const password = process.env.ESKIZ_SECRET;
+    if (!email || !password) {
+      throw new InternalServerErrorException('Eskiz credentials .env da topilmadi');
+    }
 
     const response = await axios.post(
       'https://notify.eskiz.uz/api/auth/login',
-      {
-        email: process.env.ESKIZ_EMAIL,
-        password: process.env.ESKIZ_SECRET,
-      },
-      { timeout: 5000 },
+      { email, password },
+      { timeout: 10000 },
     );
 
-    const token = response.data.data.token;
+    const token = response.data?.data?.token;
+    if (!token) {
+      throw new InternalServerErrorException('Eskiz token olinmadi');
+    }
     await this.redis.set('eskiz_token', token, 'EX', 25 * 24 * 60 * 60);
     return token;
   }
 
-  async send(phoneNumber: string, message: string): Promise<void> {
+  async send(phoneNumber: string, message: string, retry = true): Promise<void> {
+    const cleanPhone = phoneNumber.replace(/\D/g, '');
     try {
       const token = await this.getEskizToken();
-      const cleanPhone = phoneNumber.replace(/\D/g, '');
 
       await axios.post(
         'https://notify.eskiz.uz/api/message/sms/send',
@@ -41,11 +49,22 @@ export class SmsService {
           message,
           from: process.env.ESKIZ_FROM || '4546',
         },
-        { headers: { Authorization: `Bearer ${token}` } },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: 10000,
+        },
       );
     } catch (error) {
-      this.logger.error(`Eskiz SMS xatosi: ${error}`);
-      // throw qilmaymiz — SMS ketmasa ham oqim davom etsin
+      if (axios.isAxiosError(error) && error.response?.status === 401 && retry) {
+        this.logger.warn('Eskiz token eskirgan, yangilanmoqda');
+        await this.redis.del('eskiz_token');
+        return this.send(phoneNumber, message, false);
+      }
+      const detail = axios.isAxiosError(error)
+        ? JSON.stringify(error.response?.data || error.message)
+        : (error as Error).message;
+      this.logger.error(`Eskiz SMS xatosi (${cleanPhone}): ${detail}`);
+      throw new InternalServerErrorException('SMS yuborilmadi, keyinroq qaytadan urinib ko\'ring');
     }
   }
 }

@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { timingSafeEqual, randomUUID } from 'crypto';
+import { timingSafeEqual } from 'crypto';
 import axios, { AxiosInstance } from 'axios';
 import { Card } from './entities/payment.entity';
 import {
@@ -28,11 +28,6 @@ export class PaymentService {
   private readonly client: AxiosInstance;
   private readonly baseUrl?: string;
   private readonly logger = new Logger(PaymentService.name);
-
-  // Mock mode for pitch demo: skips Paylov calls, returns canned successful
-  // responses, and writes audit rows to the DB so the rest of the system
-  // (admin views, contract status transitions) behaves as if Paylov said yes.
-  private readonly mockMode: boolean;
 
   // Paylov OAuth2 credentials (developer.paylov.uz/subscribe/authorization).
   private readonly consumerKey?: string;
@@ -60,26 +55,19 @@ export class PaymentService {
     this.merchantPass = this.configService.get<string>('PAYLOV_PASSWORD');
     this.callbackUsername = this.configService.get<string>('PAYLOV_CALLBACK_USERNAME');
     this.callbackPassword = this.configService.get<string>('PAYLOV_CALLBACK_PASSWORD');
-    this.mockMode = this.configService.get<string>('PAYLOV_MODE') === 'mock';
 
-    if (this.mockMode) {
+    if (!this.baseUrl) {
+      this.logger.warn('PAYLOV_BASE_URL yo\'q.');
+    }
+    if (
+      !this.consumerKey ||
+      !this.consumerSecret ||
+      !this.merchantUser ||
+      !this.merchantPass
+    ) {
       this.logger.warn(
-        'PAYLOV_MODE=mock — Paylov chaqiruvlari soxta-muvaffaqiyat qaytaradi (demo).',
+        'PAYLOV_CONSUMER_KEY/SECRET/USERNAME/PASSWORD yo\'q. Paylov so\'rovlari ishlamaydi.',
       );
-    } else {
-      if (!this.baseUrl) {
-        this.logger.warn('PAYLOV_BASE_URL yo\'q.');
-      }
-      if (
-        !this.consumerKey ||
-        !this.consumerSecret ||
-        !this.merchantUser ||
-        !this.merchantPass
-      ) {
-        this.logger.warn(
-          'PAYLOV_CONSUMER_KEY/SECRET/USERNAME/PASSWORD yo\'q. Paylov so\'rovlari ishlamaydi.',
-        );
-      }
     }
 
     this.client = axios.create({
@@ -88,14 +76,12 @@ export class PaymentService {
       headers: { 'Content-Type': 'application/json' },
     });
 
-    if (!this.mockMode) {
-      this.client.interceptors.request.use(async (config) => {
-        const token = await this.getAccessToken();
-        config.headers = config.headers ?? {};
-        (config.headers as any)['Authorization'] = `Bearer ${token}`;
-        return config;
-      });
-    }
+    this.client.interceptors.request.use(async (config) => {
+      const token = await this.getAccessToken();
+      config.headers = config.headers ?? {};
+      (config.headers as any)['Authorization'] = `Bearer ${token}`;
+      return config;
+    });
   }
 
   // ─── OAuth2 ─────────────────────────────────────────────────────────────────
@@ -244,29 +230,6 @@ export class PaymentService {
         ? phoneNumber
         : '+' + phoneNumber.replace(/\D/g, '');
 
-      if (this.mockMode) {
-        const cid = `mock_${randomUUID()}`;
-        this.logger.log(`[MOCK] createCard userId=${userId} cid=${cid}`);
-        return {
-          result: {
-            cid,
-            otpSentPhone: cleanPhone.slice(0, 4) + '****' + cleanPhone.slice(-4),
-            // Demo uchun hint — frontend ham, support ham bilishi uchun:
-            mock: true,
-            mockHint: 'OTP sifatida har qanday 4-8 raqamni kiriting',
-            // confirmCard uchun kerakli ma'lumotlar:
-            mockCard: {
-              cardId: cid,
-              userId: Number(userId),
-              cardNumber: cleanCard,
-              expireDate: formattedExpiry,
-              phoneNumber: cleanPhone,
-            },
-          },
-          error: null,
-        };
-      }
-
       const { data } = await this.client.post(
         '/merchant/userCard/createUserCard/',
         {
@@ -291,49 +254,6 @@ export class PaymentService {
     _pinfl?: string,
   ) {
     try {
-      if (this.mockMode) {
-        // Demo: har qanday OTP qabul, fake card DB'ga saqlanadi.
-        const existing = await this.cardRepository.findOne({ where: { cardId } });
-        let card = existing;
-        if (!card) {
-          card = this.cardRepository.create({
-            cardId,
-            userId,
-            owner: 'MOCK CARDHOLDER',
-            cardName: cardName || 'Demo karta',
-            number: this.maskCardNumber('9860' + Date.now().toString().slice(-12)),
-            balance: 100_000_000, // 1 mln so'm tiyin'da
-            expireDate: '2812',
-            bankId: 'mock-bank',
-            vendor: 'UZCARD',
-            processing: 'MOCK',
-            isActive: true,
-            statusMessage: 'Mock active card',
-          });
-          await this.cardRepository.save(card);
-        }
-        this.logger.log(`[MOCK] confirmCard userId=${userId} cardId=${cardId}`);
-        return {
-          result: {
-            card: {
-              cardId: card.cardId,
-              userId: card.userId,
-              owner: card.owner,
-              cardName: card.cardName,
-              number: card.number,
-              balance: card.balance,
-              expireDate: card.expireDate,
-              bankId: card.bankId,
-              vendor: card.vendor,
-              processing: card.processing,
-              status: { is_active: true, status_message: card.statusMessage },
-            },
-            mock: true,
-          },
-          error: null,
-        };
-      }
-
       const { data } = await this.client.post(
         '/merchant/userCard/confirmUserCardCreate/',
         { cardId, otp },
@@ -381,10 +301,6 @@ export class PaymentService {
   }
 
   async resendOtp(cardId: string) {
-    if (this.mockMode) {
-      this.logger.log(`[MOCK] resendOtp cardId=${cardId}`);
-      return { result: { sent: true, mock: true }, error: null };
-    }
     try {
       const { data } = await this.client.post(
         '/merchant/userCard/resendOtp/',
@@ -407,12 +323,6 @@ export class PaymentService {
           result: null,
           error: { code: 'card_not_found', message: 'Karta topilmadi' },
         };
-      }
-
-      if (this.mockMode) {
-        await this.cardRepository.remove(card);
-        this.logger.log(`[MOCK] deleteCard userId=${userId} cardId=${cardId}`);
-        return { result: true, mock: true };
       }
 
       const { data } = await this.client.delete(
@@ -444,24 +354,7 @@ export class PaymentService {
 
   async getCardDetails(userId: number, cardId: string) {
     try {
-      const card = await this.assertCardOwnedByUser(userId, cardId);
-      if (this.mockMode) {
-        return {
-          result: {
-            card: {
-              cardId: card.cardId,
-              owner: card.owner,
-              number: card.number,
-              balance: card.balance,
-              expireDate: card.expireDate,
-              vendor: card.vendor,
-              status: { is_active: card.isActive, status_message: card.statusMessage },
-            },
-            mock: true,
-          },
-          error: null,
-        };
-      }
+      await this.assertCardOwnedByUser(userId, cardId);
       const { data } = await this.client.get(
         `/merchant/userCard/getCard/${cardId}/`,
       );
@@ -501,16 +394,6 @@ export class PaymentService {
           result: { transactionId: tx.paylovTransactionId, alreadyHeld: true },
           error: null,
         };
-      }
-
-      if (this.mockMode) {
-        const fakeId = randomUUID();
-        tx.paylovTransactionId = fakeId;
-        tx.status = TransactionStatus.HELD;
-        tx.rawResponse = { mock: true, transactionId: fakeId };
-        await this.txRepository.save(tx);
-        this.logger.log(`[MOCK] holdFunds contract=${contractId} amount=${amountSum} tx=${fakeId}`);
-        return { result: { transactionId: fakeId, mock: true }, error: null };
       }
 
       const { data } = await this.client.post('/payment/hold/create/', {
@@ -558,25 +441,6 @@ export class PaymentService {
         amountTiyin,
       });
 
-      if (this.mockMode) {
-        chargeTx.status = TransactionStatus.CHARGED;
-        chargeTx.rawResponse = { mock: true, transactionId, charged: true };
-        if (holdTx) {
-          holdTx.status = TransactionStatus.CHARGED;
-          await this.txRepository.save(holdTx);
-        }
-        await this.txRepository.save(chargeTx);
-        this.logger.log(`[MOCK] fulfillEscrow tx=${transactionId} amount=${amountSum}`);
-        return {
-          result: {
-            transactionId,
-            payedAt: new Date().toISOString().replace('T', ' ').slice(0, 19),
-            mock: true,
-          },
-          error: null,
-        };
-      }
-
       const { data } = await this.client.post('/payment/hold/charge/', {
         transactionId,
         amount: amountTiyin,
@@ -610,19 +474,6 @@ export class PaymentService {
           type: TransactionType.HOLD,
         },
       });
-
-      if (this.mockMode) {
-        if (tx) {
-          tx.status = TransactionStatus.DISMISSED;
-          tx.rawResponse = { mock: true, transactionId, status: 'cancelled' };
-          await this.txRepository.save(tx);
-        }
-        this.logger.log(`[MOCK] cancelHold tx=${transactionId}`);
-        return {
-          result: { transactionId, status: 'cancelled', mock: true },
-          error: null,
-        };
-      }
 
       const { data } = await this.client.post('/payment/hold/dismiss/', {
         transactionId,
@@ -683,24 +534,6 @@ export class PaymentService {
         };
       }
 
-      if (this.mockMode) {
-        const fakeId = randomUUID();
-        tx.paylovTransactionId = fakeId;
-        tx.status = TransactionStatus.PAID_OUT;
-        tx.rawResponse = { mock: true, transactionId: fakeId };
-        await this.txRepository.save(tx);
-        this.logger.log(`[MOCK] payoutToCard contract=${contractId} amount=${amountSum} tx=${fakeId}`);
-        return {
-          result: {
-            transactionId: fakeId,
-            status: 'success',
-            statusText: 'OK',
-            mock: true,
-          },
-          error: null,
-        };
-      }
-
       const { data } = await this.client.post(
         '/merchant/a2c/performTransaction',
         {
@@ -734,25 +567,6 @@ export class PaymentService {
       const tx = await this.txRepository.findOne({
         where: { paylovTransactionId: transactionId },
       });
-
-      if (this.mockMode) {
-        if (!tx) {
-          return {
-            result: null,
-            error: { code: 'tx_not_found', message: 'Tranzaksiya topilmadi' },
-          };
-        }
-        return {
-          result: {
-            transactionId,
-            status: tx.status,
-            type: tx.type,
-            amount: tx.amount,
-            mock: true,
-          },
-          error: null,
-        };
-      }
 
       let data: any;
       if (tx?.type === TransactionType.PAYOUT) {

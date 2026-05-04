@@ -61,9 +61,9 @@ export class UserService {
 
     if (!adminExists) {
       const hashedPassword = await bcrypt.hash(superAdminPass, 10);
-      
+
       const superAdmin = this.userRepository.create({
-        phoneNumber: superAdminPhone,
+        phoneNumber: this.normalizePhone(superAdminPhone),
         fullName: 'Asosiy Super Admin',
         password: hashedPassword,
         role: UserRole.SUPER_ADMIN,
@@ -79,106 +79,121 @@ export class UserService {
     return this.userRepository.find({ where: { role } });
   }
 
+  private normalizePhone(input: string): string {
+    let digits = (input || '').replace(/\D/g, '');
+    if (digits.startsWith('998')) digits = digits.slice(3);
+    if (digits.length !== 9) {
+      throw new BadRequestException("Telefon raqami noto'g'ri formatda");
+    }
+    return '+998' + digits;
+  }
+
+  private async assertOtpRateLimit(phone: string, kind: 'register' | 'reset') {
+    const minuteKey = `otp_rl:${kind}:1m:${phone}`;
+    const minuteCount = await this.redis.incr(minuteKey);
+    if (minuteCount === 1) await this.redis.expire(minuteKey, 60);
+    if (minuteCount > 1) {
+      throw new BadRequestException("Iltimos 1 daqiqadan so'ng qaytadan urinib ko'ring");
+    }
+
+    const hourKey = `otp_rl:${kind}:1h:${phone}`;
+    const hourCount = await this.redis.incr(hourKey);
+    if (hourCount === 1) await this.redis.expire(hourKey, 3600);
+    if (hourCount > 5) {
+      throw new BadRequestException("Soatlik limit tugadi. 1 soatdan keyin urinib ko'ring");
+    }
+  }
 
 async sendOtp(dto: SendOtpDto) {
-  // 1. Avval foydalanuvchi borligini tekshiramiz (Vaqtni tejash uchun)
-  const existingUser = await this.userRepository.findOneBy({ phoneNumber: dto.phoneNumber });
+  const phone = this.normalizePhone(dto.phoneNumber);
+
+  const existingUser = await this.userRepository.findOneBy({ phoneNumber: phone });
   if (existingUser) {
     throw new BadRequestException("Bu telefon raqami allaqachon ro'yxatdan o'tgan!");
   }
 
+  await this.assertOtpRateLimit(phone, 'register');
+
   const otp = Math.floor(1000 + Math.random() * 9000).toString();
+  await this.redis.set(`otp:${phone}`, otp, 'EX', 300);
 
-  // 2. Kodni terminalga darhol chiqarish (Hamma narsadan oldin)
-  console.log('------------------------------------------');
-  console.log(`[REGISTRATSIYA] Tel: ${dto.phoneNumber}`);
-  console.log(`[KOD]: ${otp}`);
-  console.log('------------------------------------------');
-
-  // 3. Kodni Redisda saqlash
-  await this.redis.set(`otp:${dto.phoneNumber}`, otp, 'EX', 300);
-
-  // 4. SMS yuborish (try-catch ichida, xato bo'lsa ham terminalda kod qolaveradi)
   try {
-    await this.smsService.send(dto.phoneNumber, `Escro tasdiqlash kodi: ${otp}`);
+    await this.smsService.send(phone, `Escro tasdiqlash kodi: ${otp}`);
   } catch (error) {
-    this.logger.error(`SMS yuborishda xatolik: ${error}`);
-    // SMS ketmasa ham test davom etaveradi
+    await this.redis.del(`otp:${phone}`);
+    throw error;
   }
 
-  return { 
-    message: "Tasdiqlash kodi yuborildi.",
-    hint: "Test rejimidasiz, kodni terminaldan oling" 
-  };
+  return { message: "Tasdiqlash kodi yuborildi." };
 }
+
 async forgotPassword(dto: ForgotPasswordDto) {
-  const user = await this.userRepository.findOneBy({ phoneNumber: dto.phoneNumber });
+  const phone = this.normalizePhone(dto.phoneNumber);
+
+  const user = await this.userRepository.findOneBy({ phoneNumber: phone });
   if (!user) throw new NotFoundException("Foydalanuvchi topilmadi");
 
+  await this.assertOtpRateLimit(phone, 'reset');
+
   const otp = Math.floor(1000 + Math.random() * 9000).toString();
-  
-  // Reset kodni Redisda saqlash
-  await this.redis.set(`reset_otp:${dto.phoneNumber}`, otp, 'EX', 300);
+  await this.redis.set(`reset_otp:${phone}`, otp, 'EX', 300);
 
-  // Eskiz test SMS yuborish
-  await this.smsService.send(dto.phoneNumber, `Escro parolni tiklash kodi: ${otp}`);
-
-  // Kodni terminalga chiqarish
-  console.log('------------------------------------------');
-  console.log(`[PAROL TIKLASH] Tel: ${dto.phoneNumber}`);
-  console.log(`[KOD]: ${otp}`);
-  console.log('------------------------------------------');
+  try {
+    await this.smsService.send(phone, `Escro parolni tiklash kodi: ${otp}`);
+  } catch (error) {
+    await this.redis.del(`reset_otp:${phone}`);
+    throw error;
+  }
 
   return { message: "Parolni tiklash kodi yuborildi." };
-};
+}
 
 async verifyOtp(dto: VerifyOtpDto) {
-  const savedCode = await this.redis.get(`otp:${dto.phoneNumber}`);
-  
-  // Test rejimi uchun '7777' kodiga ruxsat beramiz
-  if (dto.code !== '7777' && (!savedCode || savedCode !== dto.code)) {
-    throw new BadRequestException("Kod noto'g'ri yoki muddati o'tgan");
-  };
+  const phone = this.normalizePhone(dto.phoneNumber);
+  const savedCode = await this.redis.get(`otp:${phone}`);
 
-  // Kod to'g'ri bo'lsa, "verified" belgisini qo'yamiz
-  await this.redis.set(`verified:${dto.phoneNumber}`, 'true', 'EX', 600); // 10 daqiqa vaqt ism/parol uchun
-  await this.redis.del(`otp:${dto.phoneNumber}`); // Ishlatilgan kodni o'chiramiz
+  if (!savedCode || savedCode !== dto.code) {
+    throw new BadRequestException("Kod noto'g'ri yoki muddati o'tgan");
+  }
+
+  await this.redis.set(`verified:${phone}`, 'true', 'EX', 600);
+  await this.redis.del(`otp:${phone}`);
 
   return { message: "Kod tasdiqlandi, endi ma'lumotlaringizni kiriting" };
-};
+}
 
   // 2. Register (Kodni tekshirish va parolni saqlash)
   async completeRegister(dto: CompleteRegisterDto) {
-  const isVerified = await this.redis.get(`verified:${dto.phoneNumber}`);
+  const phone = this.normalizePhone(dto.phoneNumber);
+
+  const isVerified = await this.redis.get(`verified:${phone}`);
   if (!isVerified) {
     throw new BadRequestException("Avval telefon raqamingizni tasdiqlang");
-  };
+  }
 
-  // Parolni hashlaymiz
   const hashedPassword = await bcrypt.hash(dto.password, 10);
-  
-  // Userni bazadan qidiramiz yoki yaratamiz
-  let user = await this.userRepository.findOneBy({ phoneNumber: dto.phoneNumber });
-  
+
+  let user = await this.userRepository.findOneBy({ phoneNumber: phone });
   if (!user) {
-    user = this.userRepository.create({ phoneNumber: dto.phoneNumber });
-  };
+    user = this.userRepository.create({ phoneNumber: phone });
+  }
 
   user.fullName = dto.fullName;
   user.password = hashedPassword;
-  user.isVerified = true; // Endi foydalanuvchi tasdiqlangan
+  user.isVerified = true;
 
   await this.userRepository.save(user);
-  await this.redis.del(`verified:${dto.phoneNumber}`); 
+  await this.redis.del(`verified:${phone}`);
 
   return { message: "Muvaffaqiyatli ro'yxatdan o'tdingiz" };
 }
 
   // 3. Login (Parolni tekshirish)
   async login(dto: LoginDto) {
+  const phone = this.normalizePhone(dto.phoneNumber);
   const user = await this.userRepository.createQueryBuilder("user")
     .addSelect("user.password")
-    .where("user.phoneNumber = :phone", { phone: dto.phoneNumber })
+    .where("user.phoneNumber = :phone", { phone })
     .getOne();
   if (!user || !user.isVerified) {
     throw new UnauthorizedException("Foydalanuvchi topilmadi yoki tasdiqlanmagan");
@@ -243,25 +258,23 @@ async getProfile(userId: number) {
 
 // 2. Kodni tekshirib parolni yangilash
 async resetPassword(dto: ResetPasswordDto) {
-  const savedCode = await this.redis.get(`reset_otp:${dto.phoneNumber}`);
+  const phone = this.normalizePhone(dto.phoneNumber);
+  const savedCode = await this.redis.get(`reset_otp:${phone}`);
 
-  // Test rejimi uchun '7777' kodiga ruxsat beramiz
-  if (dto.code !== '7777' && (!savedCode || savedCode !== dto.code)) {
+  if (!savedCode || savedCode !== dto.code) {
     throw new BadRequestException("Kod noto'g'ri yoki muddati o'tgan");
-  };
+  }
 
-  const user = await this.userRepository.findOneBy({ phoneNumber: dto.phoneNumber });
+  const user = await this.userRepository.findOneBy({ phoneNumber: phone });
   if (!user) throw new NotFoundException("Foydalanuvchi topilmadi");
 
-  // Yangi parolni hashlaymiz
   user.password = await bcrypt.hash(dto.newPassword, 10);
   await this.userRepository.save(user);
 
-  // Ishlatilgan kodni o'chiramiz
-  await this.redis.del(`reset_otp:${dto.phoneNumber}`);
+  await this.redis.del(`reset_otp:${phone}`);
 
   return { message: "Parolingiz muvaffaqiyatli yangilandi. Endi login qilishingiz mumkin." };
-};
+}
 // src/user/user.service.ts
 
 async findAll() {
