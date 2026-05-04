@@ -118,7 +118,10 @@ async sendOtp(dto: SendOtpDto) {
   await this.redis.set(`otp:${phone}`, otp, 'EX', 300);
 
   try {
-    await this.smsService.send(phone, `Escro tasdiqlash kodi: ${otp}`);
+    await this.smsService.send(
+      phone,
+      `ESCRO platformasida ro'yxatdan o'tish uchun tasdiqlash kodi: ${otp}. Kodni hech kimga bermang.`,
+    );
   } catch (error) {
     await this.redis.del(`otp:${phone}`);
     throw error;
@@ -139,7 +142,10 @@ async forgotPassword(dto: ForgotPasswordDto) {
   await this.redis.set(`reset_otp:${phone}`, otp, 'EX', 300);
 
   try {
-    await this.smsService.send(phone, `Escro parolni tiklash kodi: ${otp}`);
+    await this.smsService.send(
+      phone,
+      `ESCRO platformasida ro'yxatdan o'tish uchun tasdiqlash kodi: ${otp}. Kodni hech kimga bermang.`,
+    );
   } catch (error) {
     await this.redis.del(`reset_otp:${phone}`);
     throw error;
