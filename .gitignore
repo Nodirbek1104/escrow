@@ -42,6 +42,11 @@ lerna-debug.log*
 .env.production.local
 .env.local
 
+# Paylov / boshqa maxfiy credentials (lokal dev fayl, gitlabga ketmasin)
+PAYLOV-CREDENTIALS-*.json
+PAYLOV-CREDENTIALS.json
+PAYLOV-CREDENTIALS.txt
+
 # temp directory
 .temp
 .tmp
