@@ -34,6 +34,7 @@ export class PaymentService {
   private readonly consumerSecret?: string;
   private readonly merchantUser?: string;
   private readonly merchantPass?: string;
+  private readonly merchantId?: string;
   private cachedToken?: CachedToken;
   private tokenInFlight?: Promise<string>;
 
@@ -53,20 +54,28 @@ export class PaymentService {
     this.consumerSecret = this.configService.get<string>('PAYLOV_CONSUMER_SECRET');
     this.merchantUser = this.configService.get<string>('PAYLOV_USERNAME');
     this.merchantPass = this.configService.get<string>('PAYLOV_PASSWORD');
+    this.merchantId = this.configService.get<string>('PAYLOV_MERCHANT_ID');
     this.callbackUsername = this.configService.get<string>('PAYLOV_CALLBACK_USERNAME');
     this.callbackPassword = this.configService.get<string>('PAYLOV_CALLBACK_PASSWORD');
 
-    if (!this.baseUrl) {
-      this.logger.warn('PAYLOV_BASE_URL yo\'q.');
+    const missing: string[] = [];
+    if (!this.baseUrl) missing.push('PAYLOV_BASE_URL');
+    if (!this.consumerKey) missing.push('PAYLOV_CONSUMER_KEY');
+    if (!this.consumerSecret) missing.push('PAYLOV_CONSUMER_SECRET');
+    if (!this.merchantUser) missing.push('PAYLOV_USERNAME');
+    if (!this.merchantPass) missing.push('PAYLOV_PASSWORD');
+    if (!this.merchantId) missing.push('PAYLOV_MERCHANT_ID');
+    if (missing.length) {
+      this.logger.error(
+        `Paylov sozlanmagan, quyidagi env'lar yo'q: ${missing.join(', ')}. ` +
+          'Paylov so\'rovlari sozlanmagan deb xato qaytaradi.',
+      );
+    } else {
+      this.logger.log('Paylov OAuth2 sozlamalari to\'liq, tayyor');
     }
-    if (
-      !this.consumerKey ||
-      !this.consumerSecret ||
-      !this.merchantUser ||
-      !this.merchantPass
-    ) {
+    if (!this.callbackUsername || !this.callbackPassword) {
       this.logger.warn(
-        'PAYLOV_CONSUMER_KEY/SECRET/USERNAME/PASSWORD yo\'q. Paylov so\'rovlari ishlamaydi.',
+        'PAYLOV_CALLBACK_USERNAME/PASSWORD yo\'q. Webhook Basic Auth tekshiruvi rad etadi.',
       );
     }
 
@@ -82,6 +91,27 @@ export class PaymentService {
       (config.headers as any)['Authorization'] = `Bearer ${token}`;
       return config;
     });
+
+    this.client.interceptors.response.use(
+      (response) => response,
+      async (error) => {
+        const originalRequest = error.config as any;
+        if (
+          error.response?.status === 401 &&
+          originalRequest &&
+          !originalRequest._paylovRetry
+        ) {
+          originalRequest._paylovRetry = true;
+          this.logger.warn('Paylov 401 — kesh tozalanib, token yangilanmoqda');
+          this.cachedToken = undefined;
+          const fresh = await this.getAccessToken();
+          originalRequest.headers = originalRequest.headers ?? {};
+          originalRequest.headers['Authorization'] = `Bearer ${fresh}`;
+          return this.client.request(originalRequest);
+        }
+        return Promise.reject(error);
+      },
+    );
   }
 
   // ─── OAuth2 ─────────────────────────────────────────────────────────────────
@@ -103,46 +133,66 @@ export class PaymentService {
       throw new Error('Paylov OAuth2 credentials sozlanmagan');
     }
 
+    this.tokenInFlight = this.fetchToken().finally(() => {
+      this.tokenInFlight = undefined;
+    });
+    return this.tokenInFlight;
+  }
+
+  private async fetchToken(): Promise<string> {
     const basic = Buffer.from(
       `${this.consumerKey}:${this.consumerSecret}`,
     ).toString('base64');
     const url = `${this.baseUrl}/merchant/oauth2/token/`;
 
-    this.tokenInFlight = (async () => {
-      try {
-        const { data } = await axios.post(
-          url,
-          {
-            grant_type: 'password',
-            username: this.merchantUser,
-            password: this.merchantPass,
-          },
-          {
-            headers: {
-              Authorization: `Basic ${basic}`,
-              'Content-Type': 'application/json',
-            },
-            timeout: 15_000,
-          },
-        );
-        if (!data?.access_token) {
-          throw new Error(
-            `Paylov token endpoint kutilgan javob bermadi: ${JSON.stringify(data)}`,
-          );
-        }
-        const ttlSec = Number(data.expires_in ?? 3600);
-        this.cachedToken = {
-          accessToken: data.access_token,
-          refreshToken: data.refresh_token,
-          expiresAt: Date.now() + ttlSec * 1000,
-        };
-        return data.access_token as string;
-      } finally {
-        this.tokenInFlight = undefined;
-      }
-    })();
+    const useRefresh =
+      this.cachedToken?.refreshToken && this.cachedToken.expiresAt > 0;
 
-    return this.tokenInFlight;
+    const body = useRefresh
+      ? {
+          grant_type: 'refresh_token',
+          refresh_token: this.cachedToken!.refreshToken,
+        }
+      : {
+          grant_type: 'password',
+          username: this.merchantUser,
+          password: this.merchantPass,
+        };
+
+    try {
+      const { data } = await axios.post(url, body, {
+        headers: {
+          Authorization: `Basic ${basic}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 15_000,
+      });
+      if (!data?.access_token) {
+        throw new Error(
+          `Paylov token endpoint kutilgan javob bermadi: ${JSON.stringify(data)}`,
+        );
+      }
+      const ttlSec = Number(data.expires_in ?? 3600);
+      this.cachedToken = {
+        accessToken: data.access_token,
+        refreshToken: data.refresh_token ?? this.cachedToken?.refreshToken,
+        expiresAt: Date.now() + ttlSec * 1000,
+      };
+      this.logger.log(
+        `Paylov token olindi (${useRefresh ? 'refresh' : 'password'}), TTL=${ttlSec}s`,
+      );
+      return data.access_token as string;
+    } catch (error) {
+      if (useRefresh) {
+        this.logger.warn(
+          'Paylov refresh_token rad etildi, password grant bilan qayta urinaman',
+        );
+        this.cachedToken = undefined;
+        return this.fetchToken();
+      }
+      this.cachedToken = undefined;
+      throw error;
+    }
   }
 
   // ─── HELPERS ────────────────────────────────────────────────────────────────
@@ -233,6 +283,7 @@ export class PaymentService {
       const { data } = await this.client.post(
         '/merchant/userCard/createUserCard/',
         {
+          serviceId: this.merchantId,
           userId: String(userId),
           cardNumber: cleanCard,
           expireDate: formattedExpiry,
@@ -402,6 +453,7 @@ export class PaymentService {
         amount: amountTiyin,
         time: 40320,
         externalId,
+        serviceId: this.merchantId,
       });
 
       tx.rawResponse = data;
@@ -537,6 +589,7 @@ export class PaymentService {
       const { data } = await this.client.post(
         '/merchant/a2c/performTransaction',
         {
+          serviceId: this.merchantId,
           userId: String(card.userId),
           cardId: toCardId,
           amountInTiyin: amountTiyin,
@@ -604,10 +657,10 @@ export class PaymentService {
 
   verifyWebhookBasicAuth(authHeader?: string): boolean {
     if (!this.callbackUsername || !this.callbackPassword) {
-      this.logger.warn(
-        'PAYLOV_CALLBACK_USERNAME/PASSWORD sozlanmagan, Basic Auth tekshiruvi o\'tkazib yuborildi',
+      this.logger.error(
+        'Webhook Basic Auth: PAYLOV_CALLBACK_USERNAME/PASSWORD sozlanmagan, callback rad etilmoqda',
       );
-      return true;
+      return false;
     }
     if (!authHeader || !authHeader.toLowerCase().startsWith('basic ')) return false;
 
@@ -646,64 +699,130 @@ export class PaymentService {
       result: { status, statusText },
     });
 
+    const findTxByPaylovId = (txId?: string | null) =>
+      txId
+        ? this.txRepository.findOne({
+            where: { paylovTransactionId: String(txId) },
+          })
+        : Promise.resolve(null);
+
+    const extractTxId = (): string | undefined =>
+      params?.transaction_id ?? params?.transactionId ?? payload?.transactionId;
+
     try {
-      if (method === 'transaction.check') {
-        const account = params?.account ?? {};
-        const contractIdRaw = account?.contractId ?? account?.order_id;
-        const contractId = contractIdRaw != null ? Number(contractIdRaw) : NaN;
-        if (!Number.isFinite(contractId)) {
+      switch (method) {
+        case 'transaction.check': {
+          const account = params?.account ?? {};
+          const contractIdRaw = account?.contractId ?? account?.order_id;
+          const contractId =
+            contractIdRaw != null ? Number(contractIdRaw) : NaN;
+          if (!Number.isFinite(contractId)) {
+            return err('303', 'Order not found');
+          }
+          const exists = await this.txRepository.findOne({
+            where: { contractId },
+          });
+          return exists ? ok() : err('303', 'Order not found');
+        }
+
+        case 'transaction.create': {
+          const txId = extractTxId();
+          const account = params?.account ?? {};
+          const contractIdRaw = account?.contractId ?? account?.order_id;
+          const contractId =
+            contractIdRaw != null ? Number(contractIdRaw) : NaN;
+          if (!txId || !Number.isFinite(contractId)) {
+            return err('+1', 'transaction_id or contractId missing');
+          }
+
+          const existing = await findTxByPaylovId(txId);
+          if (existing) {
+            return ok({ transaction: existing.id, create_time: existing.createdAt?.getTime?.() ?? Date.now() });
+          }
+
+          const holdTx = await this.txRepository.findOne({
+            where: { contractId, type: TransactionType.HOLD },
+          });
+          if (holdTx) {
+            holdTx.paylovTransactionId = String(txId);
+            holdTx.status = TransactionStatus.HELD;
+            holdTx.rawResponse = payload;
+            await this.txRepository.save(holdTx);
+            return ok({ transaction: holdTx.id, create_time: Date.now() });
+          }
           return err('303', 'Order not found');
         }
-        const exists = await this.txRepository.findOne({
-          where: { contractId },
-        });
-        return exists ? ok() : err('303', 'Order not found');
-      }
 
-      if (method === 'transaction.perform') {
-        const txId: string | undefined =
-          params?.transaction_id ?? params?.transactionId;
-        if (!txId) return err('+1', 'transaction_id missing');
+        case 'transaction.perform': {
+          const txId = extractTxId();
+          if (!txId) return err('+1', 'transaction_id missing');
 
-        const tx = await this.txRepository.findOne({
-          where: { paylovTransactionId: txId },
-        });
-        if (!tx) {
-          this.logger.warn(`transaction.perform unknown tx ${txId}`);
+          const tx = await findTxByPaylovId(txId);
+          if (!tx) {
+            this.logger.warn(`transaction.perform unknown tx ${txId}`);
+            return err('-31003', 'Transaction not found');
+          }
+          tx.rawResponse = payload;
+          tx.status = TransactionStatus.CHARGED;
+          await this.txRepository.save(tx);
+          return ok({ transaction: tx.id, perform_time: Date.now() });
+        }
+
+        case 'transaction.cancel': {
+          const txId = extractTxId();
+          if (!txId) return err('+1', 'transaction_id missing');
+
+          const tx = await findTxByPaylovId(txId);
+          if (!tx) return err('-31003', 'Transaction not found');
+          tx.rawResponse = payload;
+          tx.status = TransactionStatus.DISMISSED;
+          await this.txRepository.save(tx);
+          return ok({ transaction: tx.id, cancel_time: Date.now(), state: -1 });
+        }
+
+        case 'transaction.status': {
+          const txId = extractTxId();
+          if (!txId) return err('+1', 'transaction_id missing');
+          const tx = await findTxByPaylovId(txId);
+          if (!tx) return err('-31003', 'Transaction not found');
+          return ok({
+            transaction: tx.id,
+            state: tx.status,
+            type: tx.type,
+            amount: tx.amount,
+          });
+        }
+
+        default: {
+          // Documented JSON-RPC method'larga tushmagan callback'larni
+          // ko'r-ko'rona qabul qilamiz va status update'iga harakat qilamiz.
+          const txId = extractTxId();
+          const tx = await findTxByPaylovId(txId);
+          if (tx) {
+            tx.rawResponse = payload;
+            const stateRaw =
+              params?.state ??
+              params?.status ??
+              payload?.state ??
+              payload?.status;
+            if (params?.cancelled === true) {
+              tx.status = TransactionStatus.DISMISSED;
+            } else if (stateRaw) {
+              const mapped = this.mapPaylovStateToStatus(String(stateRaw));
+              if (mapped) tx.status = mapped;
+            }
+            await this.txRepository.save(tx);
+          } else {
+            this.logger.warn(
+              `Paylov callback: noma'lum method/tx (method=${method} txId=${txId})`,
+            );
+          }
           return ok();
         }
-        tx.rawResponse = payload;
-        tx.status = TransactionStatus.CHARGED;
-        await this.txRepository.save(tx);
-        return ok();
       }
-
-      const txId =
-        params?.transaction_id ??
-        params?.transactionId ??
-        payload?.transactionId;
-      if (txId) {
-        const tx = await this.txRepository.findOne({
-          where: { paylovTransactionId: String(txId) },
-        });
-        if (tx) {
-          tx.rawResponse = payload;
-          const stateRaw =
-            params?.state ?? params?.status ?? payload?.state ?? payload?.status;
-          if (params?.cancelled === true) {
-            tx.status = TransactionStatus.DISMISSED;
-          } else if (stateRaw) {
-            const mapped = this.mapPaylovStateToStatus(String(stateRaw));
-            if (mapped) tx.status = mapped;
-          }
-          await this.txRepository.save(tx);
-        }
-      }
-
-      return ok();
     } catch (e) {
       this.logger.error(`Callback handler error: ${e}`);
-      return err('+1', 'Internal error');
+      return err('-31099', 'Internal error');
     }
   }
 
