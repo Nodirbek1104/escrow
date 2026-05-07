@@ -8,6 +8,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { timingSafeEqual } from 'crypto';
 import axios, { AxiosInstance } from 'axios';
+import { InjectRedis } from '@nestjs-modules/ioredis';
+import Redis from 'ioredis';
 import { Card } from './entities/payment.entity';
 import {
   PaymentTransaction,
@@ -21,7 +23,10 @@ interface CachedToken {
   accessToken: string;
   refreshToken?: string;
   expiresAt: number;
+  refreshExpiresAt?: number;
 }
+
+const TOKEN_REDIS_KEY = 'paylov:token';
 
 @Injectable()
 export class PaymentService {
@@ -37,6 +42,7 @@ export class PaymentService {
   private readonly merchantId?: string;
   private cachedToken?: CachedToken;
   private tokenInFlight?: Promise<string>;
+  private hydrationDone = false;
 
   // Inbound callback (Paylov→us) Basic Auth.
   private readonly callbackUsername?: string;
@@ -48,6 +54,7 @@ export class PaymentService {
     @InjectRepository(PaymentTransaction)
     private readonly txRepository: Repository<PaymentTransaction>,
     private readonly configService: ConfigService,
+    @InjectRedis() private readonly redis: Redis,
   ) {
     this.baseUrl = this.configService.get<string>('PAYLOV_BASE_URL');
     this.consumerKey = this.configService.get<string>('PAYLOV_CONSUMER_KEY');
@@ -118,7 +125,7 @@ export class PaymentService {
 
   private async getAccessToken(): Promise<string> {
     const now = Date.now();
-    if (this.cachedToken && this.cachedToken.expiresAt - 60_000 > now) {
+    if (this.cachedToken?.accessToken && this.cachedToken.expiresAt - 60_000 > now) {
       return this.cachedToken.accessToken;
     }
     if (this.tokenInFlight) return this.tokenInFlight;
@@ -139,14 +146,71 @@ export class PaymentService {
     return this.tokenInFlight;
   }
 
+  private async hydrateFromRedis(): Promise<void> {
+    if (this.hydrationDone) return;
+    this.hydrationDone = true;
+    if (this.cachedToken?.refreshToken) return;
+
+    try {
+      const raw = await this.redis.get(TOKEN_REDIS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as CachedToken;
+        const now = Date.now();
+        const refreshAlive =
+          parsed.refreshExpiresAt && parsed.refreshExpiresAt - 60_000 > now;
+        if (parsed.refreshToken && refreshAlive) {
+          this.cachedToken = parsed;
+          this.logger.log('Paylov token Redis keshidan tiklandi');
+          return;
+        }
+      }
+
+      const envRefresh = this.configService.get<string>('PAYLOV_REFRESH_TOKEN');
+      if (envRefresh) {
+        this.cachedToken = {
+          accessToken: '',
+          refreshToken: envRefresh,
+          expiresAt: 0,
+          refreshExpiresAt: Date.now() + 6 * 24 * 3600 * 1000,
+        };
+        this.logger.log("PAYLOV_REFRESH_TOKEN env'dan bootstrap qilindi");
+      }
+    } catch (e) {
+      this.logger.warn(`Paylov token Redis hydrate xatosi: ${(e as Error).message}`);
+    }
+  }
+
+  private async persistToken(): Promise<void> {
+    if (!this.cachedToken?.refreshToken) return;
+    try {
+      const ttlMs =
+        (this.cachedToken.refreshExpiresAt ?? Date.now() + 7 * 24 * 3600 * 1000) -
+        Date.now();
+      const ttlSec = Math.max(60, Math.floor(ttlMs / 1000));
+      await this.redis.set(
+        TOKEN_REDIS_KEY,
+        JSON.stringify(this.cachedToken),
+        'EX',
+        ttlSec,
+      );
+    } catch (e) {
+      this.logger.warn(`Token Redis'ga saqlashda xato: ${(e as Error).message}`);
+    }
+  }
+
   private async fetchToken(): Promise<string> {
+    await this.hydrateFromRedis();
+
     const basic = Buffer.from(
       `${this.consumerKey}:${this.consumerSecret}`,
     ).toString('base64');
     const url = `${this.baseUrl}/merchant/oauth2/token/`;
 
+    const now = Date.now();
     const useRefresh =
-      this.cachedToken?.refreshToken && this.cachedToken.expiresAt > 0;
+      !!this.cachedToken?.refreshToken &&
+      (!this.cachedToken.refreshExpiresAt ||
+        this.cachedToken.refreshExpiresAt - 60_000 > now);
 
     const body = useRefresh
       ? {
@@ -173,13 +237,17 @@ export class PaymentService {
         );
       }
       const ttlSec = Number(data.expires_in ?? 3600);
+      const refreshTtlSec = Number(data.refresh_expires_in ?? 7 * 24 * 3600);
+      const issuedAt = Date.now();
       this.cachedToken = {
         accessToken: data.access_token,
         refreshToken: data.refresh_token ?? this.cachedToken?.refreshToken,
-        expiresAt: Date.now() + ttlSec * 1000,
+        expiresAt: issuedAt + ttlSec * 1000,
+        refreshExpiresAt: issuedAt + refreshTtlSec * 1000,
       };
+      await this.persistToken();
       this.logger.log(
-        `Paylov token olindi (${useRefresh ? 'refresh' : 'password'}), TTL=${ttlSec}s`,
+        `Paylov token olindi (${useRefresh ? 'refresh' : 'password'}), access TTL=${ttlSec}s, refresh TTL=${refreshTtlSec}s`,
       );
       return data.access_token as string;
     } catch (error) {
@@ -188,9 +256,11 @@ export class PaymentService {
           'Paylov refresh_token rad etildi, password grant bilan qayta urinaman',
         );
         this.cachedToken = undefined;
+        await this.redis.del(TOKEN_REDIS_KEY).catch(() => undefined);
         return this.fetchToken();
       }
       this.cachedToken = undefined;
+      await this.redis.del(TOKEN_REDIS_KEY).catch(() => undefined);
       throw error;
     }
   }
@@ -271,11 +341,15 @@ export class PaymentService {
       }
 
       const cleanCard = cardNumber.replace(/\s+/g, '');
-      const parts = expireDate.split('/');
-      const formattedExpiry =
-        parts.length === 2
-          ? parts[1].trim() + parts[0].trim()
-          : expireDate.replace(/\//g, '');
+      // Paylov docs (createUserCard): expireDate YYMM formatida bo'lishi shart.
+      // Frontend "MM/YY" yoki "MMYY" yuborishi mumkin (CreateCardDto regex shu).
+      const expDigits = expireDate.replace(/\D/g, '');
+      if (expDigits.length !== 4) {
+        throw new BadRequestException(
+          "Karta muddati noto'g'ri: MM/YY yoki MMYY formatida bo'lishi kerak",
+        );
+      }
+      const formattedExpiry = expDigits.slice(2, 4) + expDigits.slice(0, 2);
       const cleanPhone = phoneNumber.startsWith('+')
         ? phoneNumber
         : '+' + phoneNumber.replace(/\D/g, '');
@@ -302,12 +376,16 @@ export class PaymentService {
     cardId: string,
     otp: string,
     cardName?: string,
-    _pinfl?: string,
+    pinfl?: string,
   ) {
     try {
+      const body: Record<string, string> = { cardId, otp };
+      if (cardName) body.cardName = cardName;
+      if (pinfl) body.pinfl = pinfl;
+
       const { data } = await this.client.post(
         '/merchant/userCard/confirmUserCardCreate/',
-        { cardId, otp },
+        body,
       );
 
       if (data?.result?.card) {
@@ -451,6 +529,7 @@ export class PaymentService {
         userId: String(userId),
         cardId,
         amount: amountTiyin,
+        account: {},
         time: 40320,
         externalId,
         serviceId: this.merchantId,
@@ -623,15 +702,26 @@ export class PaymentService {
 
       let data: any;
       if (tx?.type === TransactionType.PAYOUT) {
-        const res = await this.client.get(
-          `/merchant/a2c/checkTransaction/${transactionId}`,
-        );
+        // Docs: GET /merchant/a2c/checkTransaction/{TransactionId}
+        // Agar tx.extId mavjud bo'lsa, byExternalId yo'lini afzal ko'ramiz.
+        const res = tx?.extId
+          ? await this.client.get(
+              `/merchant/a2c/checkTransaction/byExternalId/${encodeURIComponent(tx.extId)}/`,
+            )
+          : await this.client.get(
+              `/merchant/a2c/checkTransaction/${transactionId}`,
+            );
         data = res.data;
       } else {
-        const res = await this.client.get(
-          '/merchant/payment/hold/status/',
-          { params: { transactionId } },
-        );
+        // Docs: GET /merchant/payment/hold/status/?externalId=...
+        if (!tx?.extId) {
+          throw new BadRequestException(
+            'Hold tranzaksiyasi uchun externalId topilmadi',
+          );
+        }
+        const res = await this.client.get('/merchant/payment/hold/status/', {
+          params: { externalId: tx.extId },
+        });
         data = res.data;
       }
 
