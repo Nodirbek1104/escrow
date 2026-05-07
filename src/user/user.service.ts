@@ -117,15 +117,15 @@ async sendOtp(dto: SendOtpDto) {
   const otp = Math.floor(1000 + Math.random() * 9000).toString();
   await this.redis.set(`otp:${phone}`, otp, 'EX', 300);
 
-  try {
-    await this.smsService.send(
+  void this.smsService
+    .send(
       phone,
       `ESCRO platformasida ro'yxatdan o'tish uchun tasdiqlash kodi: ${otp}. Kodni hech kimga bermang.`,
-    );
-  } catch (error) {
-    await this.redis.del(`otp:${phone}`);
-    throw error;
-  }
+    )
+    .catch(async (error) => {
+      this.logger.error(`OTP SMS muvaffaqiyatsiz (${phone}): ${(error as Error).message}`);
+      await this.redis.del(`otp:${phone}`);
+    });
 
   return { message: "Tasdiqlash kodi yuborildi." };
 }
@@ -141,15 +141,15 @@ async forgotPassword(dto: ForgotPasswordDto) {
   const otp = Math.floor(1000 + Math.random() * 9000).toString();
   await this.redis.set(`reset_otp:${phone}`, otp, 'EX', 300);
 
-  try {
-    await this.smsService.send(
+  void this.smsService
+    .send(
       phone,
       `ESCRO platformasida ro'yxatdan o'tish uchun tasdiqlash kodi: ${otp}. Kodni hech kimga bermang.`,
-    );
-  } catch (error) {
-    await this.redis.del(`reset_otp:${phone}`);
-    throw error;
-  }
+    )
+    .catch(async (error) => {
+      this.logger.error(`Reset OTP SMS muvaffaqiyatsiz (${phone}): ${(error as Error).message}`);
+      await this.redis.del(`reset_otp:${phone}`);
+    });
 
   return { message: "Parolni tiklash kodi yuborildi." };
 }
