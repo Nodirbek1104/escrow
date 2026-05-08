@@ -333,7 +333,7 @@ export class PaymentService {
     userId: number | string,
     cardNumber: string,
     expireDate: string,
-    phoneNumber: string,
+    phoneNumber?: string,
   ) {
     try {
       if (!userId) {
@@ -357,19 +357,26 @@ export class PaymentService {
         );
       }
       const formattedExpiry = expDigits.slice(2, 4) + expDigits.slice(0, 2);
-      const cleanPhone = phoneNumber.startsWith('+')
-        ? phoneNumber
-        : '+' + phoneNumber.replace(/\D/g, '');
+
+      const body: Record<string, string> = {
+        serviceId: this.merchantId!,
+        userId: String(userId),
+        cardNumber: cleanCard,
+        expireDate: formattedExpiry,
+      };
+      // phoneNumber Paylov uchun ixtiyoriy. Kiritilgan bo'lsa Paylov uni
+      // bankdagi qayd bilan solishtiradi va mos kelmasa phone_not_match
+      // qaytaradi. Bo'sh bo'lsa Paylov bankdan haqiqiy raqamni o'zi oladi
+      // va o'sha raqamga SMS yuboradi.
+      if (phoneNumber && phoneNumber.trim()) {
+        body.phoneNumber = phoneNumber.startsWith('+')
+          ? phoneNumber
+          : '+' + phoneNumber.replace(/\D/g, '');
+      }
 
       const { data } = await this.client.post(
         '/merchant/userCard/createUserCard/',
-        {
-          serviceId: this.merchantId,
-          userId: String(userId),
-          cardNumber: cleanCard,
-          expireDate: formattedExpiry,
-          phoneNumber: cleanPhone,
-        },
+        body,
       );
       return data;
     } catch (error) {

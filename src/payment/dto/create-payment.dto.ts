@@ -28,11 +28,12 @@ export class CreateCardDto {
   })
   expireDate!: string;
 
-  /** Telefon raqami. + bilan yoki +siz, bo'shliq/qavslar avtomatik tozalanadi. */
+  /** Telefon raqami. Ixtiyoriy: bo'sh bo'lsa, Paylov bankdan kartaning
+   *  ro'yxatdagi raqamini olib SMS yuboradi (docs: phoneNumber required="no"). */
+  @IsOptional()
   @IsString()
-  @IsNotEmpty({ message: 'Telefon raqamini kiriting' })
   @Matches(/^\+?\d{9,15}$/, { message: 'Telefon raqami noto\'g\'ri' })
-  phoneNumber!: string;
+  phoneNumber?: string;
 }
 
 export class ConfirmCardDto {
