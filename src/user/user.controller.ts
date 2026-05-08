@@ -1,4 +1,4 @@
-import { Controller, Post, Body, HttpCode, HttpStatus, UseGuards, Get, Request, Patch } from '@nestjs/common';
+import { Controller, Post, Body, HttpCode, HttpStatus, UseGuards, Get, Request, Patch, Headers } from '@nestjs/common';
 import { UserService } from './user.service';
 import { SendOtpDto, CompleteRegisterDto, LoginDto, VerifyOtpDto, ForgotPasswordDto, ResetPasswordDto } from './dto/create-user.dto';
 import {UpdateUserDto} from './dto/update-user.dto'
@@ -22,15 +22,37 @@ async verifyOtp(@Body() verifyOtpDto: VerifyOtpDto) {
 
   // 2. Ro'yxatdan o'tishni yakunlash (SMS kod + Parol)
   @Post('register')
-  async register(@Body() completeDto: CompleteRegisterDto) {
-    return this.userService.completeRegister(completeDto);
+  async register(
+    @Body() completeDto: CompleteRegisterDto,
+    @Headers('x-tg-data') tgData?: string,
+  ) {
+    const result = await this.userService.completeRegister(completeDto);
+    if (result?.user?.id && tgData) {
+      void this.userService.linkTelegramFromInitData(result.user.id, tgData);
+    }
+    return result;
   }
 
   // 3. Login (Telefon + Parol)
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  async login(@Body() loginDto: LoginDto) {
-    return this.userService.login(loginDto);
+  async login(
+    @Body() loginDto: LoginDto,
+    @Headers('x-tg-data') tgData?: string,
+  ) {
+    const result = await this.userService.login(loginDto);
+    if (result?.user?.id && tgData) {
+      void this.userService.linkTelegramFromInitData(result.user.id, tgData);
+    }
+    return result;
+  }
+
+  // 3b. Telegram Mini-App auto-login.
+  // Returning users skip phone+OTP entirely once their telegramId is linked.
+  @Post('telegram')
+  @HttpCode(HttpStatus.OK)
+  async loginTelegram(@Body() body: { initData: string }) {
+    return this.userService.loginByTelegram(body?.initData);
   }
 
   @UseGuards(AuthGuard('jwt'))

@@ -38,6 +38,11 @@ export class User {
   @Column({ type: "timestamp", nullable: true })
   otpExpires?: Date | null;
 
+  // Telegram WebApp user.id — set when the user opens the Mini-App and we can
+  // verify their initData. Lets us re-issue a JWT without phone+OTP next time.
+  @Column({ type: "bigint", nullable: true, unique: true })
+  telegramId?: string | null;
+
   // --- RELATIONLAR ---
   
   @OneToMany(() => EscrowContract, (contract) => contract.creator)

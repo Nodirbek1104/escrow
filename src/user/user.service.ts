@@ -27,6 +27,7 @@ import axios from 'axios';
 import dotenv from 'dotenv';
 import { AdminCreateDto } from './dto/create-admin.dto';
 import { SmsService } from './send.sms.service';
+import { verifyTelegramInitData } from '../auth/telegram-init-data';
 
 dotenv.config();
 
@@ -188,10 +189,18 @@ async verifyOtp(dto: VerifyOtpDto) {
   user.password = hashedPassword;
   user.isVerified = true;
 
-  await this.userRepository.save(user);
+  const saved = await this.userRepository.save(user);
   await this.redis.del(`verified:${phone}`);
 
-  return { message: "Muvaffaqiyatli ro'yxatdan o'tdingiz" };
+  return {
+    message: "Muvaffaqiyatli ro'yxatdan o'tdingiz",
+    user: {
+      id: saved.id,
+      fullName: saved.fullName,
+      phoneNumber: saved.phoneNumber,
+      role: saved.role,
+    },
+  };
 }
 
   // 3. Login (Parolni tekshirish)
@@ -210,24 +219,75 @@ async verifyOtp(dto: VerifyOtpDto) {
     throw new UnauthorizedException("Telefon raqami yoki parol noto'g'ri");
   }
 
-  // --- BU YERGA ROLE QO'SHILDI ---
-  const payload = { 
-    sub: user.id, 
-    phoneNumber: user.phoneNumber, 
-    fullName: user.fullName,
-    role: user.role // AdminGuard shu yerdan o'qiydi
-  };
-
-  return {
-    access_token: this.jwtService.sign(payload),
-    user: {
-      id: user.id,
-      fullName: user.fullName,
-      phoneNumber: user.phoneNumber,
-      role: user.role
-    }
-  };
+  return this.issueAuth(user);
 }
+
+  private issueAuth(user: User) {
+    const payload = {
+      sub: user.id,
+      phoneNumber: user.phoneNumber,
+      fullName: user.fullName,
+      role: user.role,
+    };
+    return {
+      access_token: this.jwtService.sign(payload),
+      user: {
+        id: user.id,
+        fullName: user.fullName,
+        phoneNumber: user.phoneNumber,
+        role: user.role,
+      },
+    };
+  }
+
+  /**
+   * Re-issue a JWT for a user identified by their Telegram WebApp initData.
+   * The frontend calls this on app boot so a returning Mini-App user does not
+   * have to re-enter phone+OTP. Throws NotFoundException when the Telegram
+   * account has never been linked — the frontend then falls back to phone+OTP
+   * and the link is created automatically on the next successful login.
+   */
+  async loginByTelegram(initData: string) {
+    const botToken = process.env.TG_BOT_TOKEN;
+    if (!botToken) {
+      throw new InternalServerErrorException('TG_BOT_TOKEN sozlanmagan');
+    }
+    const parsed = verifyTelegramInitData(initData, botToken);
+    if (!parsed.user?.id) {
+      throw new BadRequestException("initData ichida user.id yo'q");
+    }
+    const telegramId = String(parsed.user.id);
+    const user = await this.userRepository.findOne({
+      where: { telegramId, isVerified: true },
+    });
+    if (!user) {
+      throw new NotFoundException('Telegram hisobi hali biriktirilmagan');
+    }
+    return this.issueAuth(user);
+  }
+
+  /**
+   * Best-effort: associate the given Telegram WebApp initData (already
+   * verified by the caller, or freshly verified here) with the user, so
+   * future Mini-App opens can skip phone+OTP. Errors are swallowed because
+   * this runs as a side-effect of the regular login/register flow and must
+   * not break the response.
+   */
+  async linkTelegramFromInitData(userId: number, initData?: string): Promise<void> {
+    if (!initData) return;
+    const botToken = process.env.TG_BOT_TOKEN;
+    if (!botToken) return;
+    try {
+      const parsed = verifyTelegramInitData(initData, botToken);
+      const telegramId = parsed.user?.id ? String(parsed.user.id) : null;
+      if (!telegramId) return;
+      await this.userRepository.update({ id: userId }, { telegramId });
+    } catch (err) {
+      this.logger.warn(
+        `linkTelegramFromInitData: ${(err as Error).message} (userId=${userId})`,
+      );
+    }
+  }
 
   async logout(token: string, expiresIn){
     await this.redis.set(token, 'blacklisted', 'EX', expiresIn);
