@@ -81,7 +81,13 @@ export class MessagesGateway {
 
   @SubscribeMessage('sendMessage')
   async handleMessage(
-    @MessageBody() data: { contractId: number; content: string; fileUrl?: string },
+    @MessageBody()
+    data: {
+      contractId: number;
+      content: string;
+      fileUrl?: string;
+      replyToId?: number;
+    },
     @ConnectedSocket() client: Socket,
   ) {
     const user = client.data.user;
@@ -92,17 +98,67 @@ export class MessagesGateway {
       data.content,
       user.sub,
       data.fileUrl,
+      data.replyToId,
     );
 
-    // Broadcast to all users in the contract room
+    // Broadcast to all users in the contract room. savedMessage already
+    // carries `sender` and `replyTo` because findOne re-fetched relations.
     this.server.to(`contract_${data.contractId}`).emit('newMessage', {
       ...savedMessage,
-      sender: {
+      sender: savedMessage?.sender ?? {
         id: user.sub,
         fullName: user.fullName || 'User',
       },
     });
 
     return savedMessage;
+  }
+
+  @SubscribeMessage('editMessage')
+  async handleEdit(
+    @MessageBody() data: { messageId: number; content: string },
+    @ConnectedSocket() client: Socket,
+  ) {
+    const user = client.data.user;
+    if (!user) return;
+    try {
+      const updated = await this.messagesService.editMessage(
+        data.messageId,
+        user.sub,
+        data.content,
+      );
+      this.server.to(`contract_${updated.contractId}`).emit('messageEdited', {
+        id: updated.id,
+        contractId: updated.contractId,
+        content: updated.content,
+        editedAt: updated.editedAt,
+      });
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, message: err?.message };
+    }
+  }
+
+  @SubscribeMessage('deleteMessage')
+  async handleDelete(
+    @MessageBody() data: { messageId: number },
+    @ConnectedSocket() client: Socket,
+  ) {
+    const user = client.data.user;
+    if (!user) return;
+    try {
+      const deleted = await this.messagesService.deleteMessage(
+        data.messageId,
+        user.sub,
+      );
+      this.server.to(`contract_${deleted.contractId}`).emit('messageDeleted', {
+        id: deleted.id,
+        contractId: deleted.contractId,
+        deletedAt: deleted.deletedAt,
+      });
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, message: err?.message };
+    }
   }
 }

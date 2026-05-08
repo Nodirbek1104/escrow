@@ -1,4 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, MoreThan, Not, Repository } from 'typeorm';
 import { Message } from './entities/message.entity';
@@ -27,6 +32,7 @@ export class MessagesService {
     content: string,
     senderId: number,
     fileUrl?: string,
+    replyToId?: number,
   ) {
     const message = this.messageRepository.create({
       contractId,
@@ -34,8 +40,14 @@ export class MessagesService {
       senderId,
       fileUrl,
       type: 'user',
+      replyToId: replyToId ?? null,
     });
-    return this.messageRepository.save(message);
+    const saved = await this.messageRepository.save(message);
+    // Re-fetch with replyTo so the broadcast carries the quoted snippet.
+    return this.messageRepository.findOne({
+      where: { id: saved.id },
+      relations: ['sender', 'replyTo', 'replyTo.sender'],
+    }) as Promise<Message>;
   }
 
   /** Persist a system note in a contract chat (status change, etc.) */
@@ -58,7 +70,7 @@ export class MessagesService {
     const messages = await this.messageRepository.find({
       where: { contractId },
       order: { createdAt: 'ASC' },
-      relations: ['sender'],
+      relations: ['sender', 'replyTo', 'replyTo.sender'],
     });
 
     // Annotate each message with readByOther for the ✓ / ✓✓ ticks UI.
@@ -167,6 +179,48 @@ export class MessagesService {
     );
 
     return rows;
+  }
+
+  /** Edit own user message. Cannot edit system or deleted messages. */
+  async editMessage(messageId: number, userId: number, newContent: string) {
+    const m = await this.messageRepository.findOne({
+      where: { id: messageId },
+    });
+    if (!m) throw new NotFoundException('Xabar topilmadi');
+    if (m.senderId !== userId) {
+      throw new ForbiddenException('Faqat o\'z xabaringizni tahrirlay olasiz');
+    }
+    if (m.type === 'system') {
+      throw new BadRequestException('Tizim xabarini tahrirlab bo\'lmaydi');
+    }
+    if (m.deletedAt) {
+      throw new BadRequestException('O\'chirilgan xabarni tahrirlab bo\'lmaydi');
+    }
+    if (!newContent || !newContent.trim()) {
+      throw new BadRequestException('Matn bo\'sh bo\'lmasligi kerak');
+    }
+    m.content = newContent.trim();
+    m.editedAt = new Date();
+    return this.messageRepository.save(m);
+  }
+
+  /** Soft-delete own user message. Row stays for audit; content cleared. */
+  async deleteMessage(messageId: number, userId: number) {
+    const m = await this.messageRepository.findOne({
+      where: { id: messageId },
+    });
+    if (!m) throw new NotFoundException('Xabar topilmadi');
+    if (m.senderId !== userId) {
+      throw new ForbiddenException("Faqat o'z xabaringizni o'chira olasiz");
+    }
+    if (m.type === 'system') {
+      throw new BadRequestException("Tizim xabarini o'chirib bo'lmaydi");
+    }
+    if (m.deletedAt) return m; // idempotent
+    m.deletedAt = new Date();
+    m.content = '';
+    m.fileUrl = null as any;
+    return this.messageRepository.save(m);
   }
 
   /** Mark all messages in a contract as read for the given user.

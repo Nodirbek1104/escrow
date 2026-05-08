@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
 import { User } from '../../user/entities/user.entity';
 import { EscrowContract } from '../../escrocontracts/entities/escrocontract.entity';
 
@@ -14,6 +14,22 @@ export class Message {
 
   @Column({ nullable: true })
   fileUrl: string;
+
+  /** Quoted message id; loaded lazily so list query joins it cheaply. */
+  @Column({ type: 'integer', nullable: true })
+  replyToId?: number | null;
+
+  @ManyToOne(() => Message, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'replyToId' })
+  replyTo?: Message | null;
+
+  /** Set when the sender edits this message; FE shows "(tahrirlandi)". */
+  @Column({ type: 'timestamp', nullable: true })
+  editedAt?: Date | null;
+
+  /** Soft-delete: row stays for audit, content is wiped on delete. */
+  @Column({ type: 'timestamp', nullable: true })
+  deletedAt?: Date | null;
 
   /**
    * 'user' = a real participant message (default)
