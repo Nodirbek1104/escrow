@@ -8,11 +8,19 @@ import { SmsModule } from '../user/sms.module';
 import { AuditLogModule } from '../audit-log/audit-log.module';
 import { PaymentModule } from '../payment/payment.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { MessagesModule } from '../messages/messages.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([EscrowContract, User]),AuditLogModule, SmsModule, PaymentModule, SmsModule, NotificationsModule], 
-  controllers: [EscrocontractsController], 
-  providers: [EscrocontractsService], 
-  exports: [EscrocontractsService]
+  imports: [
+    TypeOrmModule.forFeature([EscrowContract, User]),
+    AuditLogModule,
+    SmsModule,
+    PaymentModule,
+    NotificationsModule,
+    MessagesModule,
+  ],
+  controllers: [EscrocontractsController],
+  providers: [EscrocontractsService],
+  exports: [EscrocontractsService],
 })
 export class EscrocontractsModule {}

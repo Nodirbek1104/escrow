@@ -14,6 +14,10 @@ import { UnauthorizedException } from '@nestjs/common';
   cors: {
     origin: '*',
   },
+  // Mount under /api/socket.io/ so that the existing nginx `/api` proxy
+  // (with proxy_set_header Upgrade) carries WebSocket frames to backend
+  // without us needing a separate `/socket.io` location block.
+  path: '/api/socket.io/',
 })
 export class MessagesGateway {
   @WebSocketServer()
@@ -46,6 +50,16 @@ export class MessagesGateway {
   ) {
     client.join(`contract_${data.contractId}`);
     return { status: 'joined', room: `contract_${data.contractId}` };
+  }
+
+  /**
+   * Broadcast a generic event to everyone currently in the contract room.
+   * Used by EscrocontractsService to push status changes (contractUpdated)
+   * so the FE doesn't have to poll.
+   */
+  emitToContract(contractId: number, event: string, payload: any) {
+    if (!this.server) return;
+    this.server.to(`contract_${contractId}`).emit(event, payload);
   }
 
   @SubscribeMessage('sendMessage')

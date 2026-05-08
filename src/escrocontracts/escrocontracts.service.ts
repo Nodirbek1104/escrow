@@ -16,6 +16,7 @@ import { InjectRedis } from '@nestjs-modules/ioredis';
 import Redis from 'ioredis';
 import { PaymentService } from '../payment/payment.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { MessagesGateway } from '../messages/messages.gateway';
 import {
   computeCommission,
   getCommissionPercent,
@@ -38,8 +39,21 @@ export class EscrocontractsService {
     private readonly smsService: SmsService,
     private readonly paymentService: PaymentService,
     private readonly notificationsService: NotificationsService,
+    private readonly messagesGateway: MessagesGateway,
     @InjectRedis() private readonly redis: Redis,
   ) {}
+
+  private emitContractUpdated(contract: { id: number; status: string }) {
+    try {
+      this.messagesGateway.emitToContract(contract.id, 'contractUpdated', {
+        id: contract.id,
+        status: contract.status,
+        at: new Date().toISOString(),
+      });
+    } catch (e) {
+      this.logger.warn(`emitContractUpdated failed: ${(e as Error).message}`);
+    }
+  }
 
   // ─── 1. CREATE (IJROCHI TOMONIDAN) ──────────────────────────────────────────
   async create(dto: CreateEscrowContractDto, user: any, filePath?: string) {
@@ -229,6 +243,8 @@ export class EscrocontractsService {
         );
       }
 
+      this.emitContractUpdated(savedContract);
+
       return savedContract;
     } catch (error) {
       this.logger.error(`UpdateStatus Error: ${error}`);
@@ -336,6 +352,8 @@ export class EscrocontractsService {
           saved.id.toString(),
         );
       }
+
+      this.emitContractUpdated(saved);
 
       return saved;
     } catch (error) {

@@ -17,6 +17,6 @@ import { JwtModule } from '@nestjs/jwt';
   ],
   providers: [MessagesService, MessagesGateway],
   controllers: [MessagesController],
-  exports: [MessagesService],
+  exports: [MessagesService, MessagesGateway],
 })
 export class MessagesModule {}
