@@ -35,6 +35,22 @@ export class EscrowContract {
   })
   amount!: number;
 
+  /**
+   * Platform fee, frozen at create time so future percentage changes do not
+   * retroactively rewrite older contracts. Buyer is charged
+   * `amount + commissionAmount`; executor receives `amount`.
+   */
+  @Column('decimal', {
+    precision: 12,
+    scale: 2,
+    default: 0,
+    transformer: {
+      to: (value: number) => value ?? 0,
+      from: (value: string) => parseFloat(value ?? '0'),
+    },
+  })
+  commissionAmount!: number;
+
   // --- To'lov bilan bog'liq yangi maydonlar ---
 
   @Column({ nullable: true })

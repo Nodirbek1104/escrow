@@ -16,6 +16,11 @@ import { InjectRedis } from '@nestjs-modules/ioredis';
 import Redis from 'ioredis';
 import { PaymentService } from '../payment/payment.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import {
+  computeCommission,
+  getCommissionPercent,
+  totalCharge,
+} from './commission';
 import { error } from 'console';
 
 const INVITE_TTL = 60 * 60 * 24; // 24 soat
@@ -39,8 +44,10 @@ export class EscrocontractsService {
   // ─── 1. CREATE (IJROCHI TOMONIDAN) ──────────────────────────────────────────
   async create(dto: CreateEscrowContractDto, user: any, filePath?: string) {
     try {
+      const commissionAmount = computeCommission(Number(dto.amount));
       const contract = this.contractRepo.create({
         ...dto,
+        commissionAmount,
         technicalTermsFile: filePath,
         status: EscrowStatus.PENDING,
         creatorId: user.userId, // Creator = xaridor (buyer); ijrochi taklif qilinadi
@@ -110,11 +117,12 @@ export class EscrocontractsService {
           throw new BadRequestException('Shartnomani tasdiqlash uchun karta kiritish shart!');
         }
 
-        // To'lovni muzlatish (Hold) jarayoni
+        // Buyer kartasidan jami summa (kontrakt + komissiya) muzlatiladi.
+        const total = totalCharge(contract.amount, contract.commissionAmount);
         const holdResult = await this.paymentService.holdFunds(
           user.userId,
           data.cardId,
-          contract.amount,
+          total,
           contract.id.toString(),
         );
 
@@ -163,17 +171,19 @@ export class EscrocontractsService {
           throw new BadRequestException('Ijrochining kartasi belgilanmagan, payout amalga oshmaydi');
         }
 
-        // 1) Hold'ni merchant hisobiga charge qilamiz
+        // 1) Hold'ni merchant hisobiga to'liq charge qilamiz (jami summa).
+        const total = totalCharge(contract.amount, contract.commissionAmount);
         const chargeRes = await this.paymentService.fulfillEscrow(
           contract.transactionId,
-          contract.amount,
+          total,
         );
         if (!chargeRes?.result) {
           const errMsg = chargeRes?.error?.message || 'To\'lovni amalga oshirishda xatolik';
           throw new BadRequestException(errMsg);
         }
 
-        // 2) Merchant hisobidan ijrochi kartasiga payout
+        // 2) Merchant hisobidan ijrochi kartasiga sof summa payout.
+        // Komissiya merchant'da qoladi.
         const payoutRes = await this.paymentService.payoutToCard(
           contract.receiverCardId,
           contract.amount,
@@ -229,12 +239,12 @@ export class EscrocontractsService {
   // ─── 4. FIND ONE (XATOLIKLAR BILAN) ────────────────────────────────────────
   async findOne(id: number, user: any): Promise<EscrowContract> {
     try {
-      const contract = await this.contractRepo.findOne({ 
-        where: { id }, 
-        relations: ['creator'] 
+      const contract = await this.contractRepo.findOne({
+        where: { id },
+        relations: ['creator'],
       });
       if (!contract) throw new NotFoundException('Shartnoma topilmadi');
-      
+
       // Admin bo'lsa hamma shartnomani ko'ra oladi
       const isAdmin = user.role === 'admin' || user.role === 'super_admin';
       if (!isAdmin && contract.creatorId !== user.userId && contract.executorPhoneNumber !== user.phoneNumber) {
@@ -242,11 +252,20 @@ export class EscrocontractsService {
          throw new ForbiddenException('Sizda ushbu shartnomani ko‘rish huquqi yo‘q');
       }
 
-      return contract;
+      return this.withCommissionMeta(contract);
     } catch (error) {
       if (error instanceof NotFoundException) throw error;
       throw new BadRequestException('Maʼlumotni olishda xato');
     }
+  }
+
+  /** Attach commissionPercent + totalAmount to the response (computed). */
+  private withCommissionMeta(contract: EscrowContract): any {
+    return {
+      ...contract,
+      commissionPercent: getCommissionPercent(),
+      totalAmount: totalCharge(contract.amount, contract.commissionAmount),
+    };
   }
 
   // ─── 5. BEKOR QILISH (UNHOLD BILAN) ────────────────────────────────────────
