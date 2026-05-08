@@ -272,19 +272,72 @@ export class EscrocontractsService {
   async cancel(id: number, user: any) {
     try {
       const contract = await this.findOne(id, user);
-      
       const isAdmin = user.role === 'admin' || user.role === 'super_admin';
+
+      // Idempotent: agar allaqachon CANCELLED bo'lsa, hech narsa qilmaymiz.
+      if (contract.status === EscrowStatus.CANCELLED) {
+        return contract;
+      }
+
+      // COMPLETED yoki boshqa terminal holatlardan bekor qilib bo'lmaydi.
+      if (contract.status === EscrowStatus.COMPLETED) {
+        throw new BadRequestException("Yakunlangan shartnomani bekor qilib bo'lmaydi");
+      }
+
+      // DISPUTED holatda faqat admin bekor qilib refund qila oladi.
+      if (contract.status === EscrowStatus.DISPUTED && !isAdmin) {
+        throw new ForbiddenException('Nizodagi shartnomani faqat admin bekor qiladi');
+      }
+
+      // Default: faqat xaridor (creator) bekor qila oladi (yoki admin).
       if (!isAdmin && contract.creatorId !== user.userId) {
         throw new ForbiddenException('Bekor qilish huquqi yo‘q');
       }
-      
-      if (contract.status === EscrowStatus.PAYMENT_HELD) {
-        // Pul muzlatilgan bo'lsa, uni yechib yuboramiz (unhold)
-        await this.paymentService.cancelHold(contract.transactionId!);
+
+      // Hold mavjud bo'lsa, avval Paylov tomonida dismiss qilamiz; muvaffaqiyatsiz
+      // bo'lsa kontrakt statusi o'zgarmaydi — pul Paylov'da muzlatilgan holicha
+      // qoladi va admin qo'lda hal qilishi mumkin.
+      const heldStates = [
+        EscrowStatus.PAYMENT_HELD,
+        EscrowStatus.ACTIVE,
+        EscrowStatus.DISPUTED,
+      ];
+      if (heldStates.includes(contract.status) && contract.transactionId) {
+        const dismissRes = await this.paymentService.cancelHold(
+          contract.transactionId,
+          contract.id,
+        );
+        if (!dismissRes?.result) {
+          const errMsg =
+            dismissRes?.error?.message ||
+            "Paylov tomonida dismiss amalga oshmadi, holatda o'zgarish bo'lmadi";
+          this.logger.error(
+            `Cancel dismiss failed for contract ${contract.id}: ${JSON.stringify(dismissRes?.error)}`,
+          );
+          throw new BadRequestException(errMsg);
+        }
       }
-      
+
       contract.status = EscrowStatus.CANCELLED;
-      return await this.contractRepo.save(contract);
+      const saved = await this.contractRepo.save(contract);
+
+      // Ikki tarafni ham xabardor qilamiz.
+      const targets = [saved.creatorId, saved.executorId].filter(
+        (uid): uid is number => typeof uid === 'number' && uid !== user.userId,
+      );
+      for (const targetUserId of targets) {
+        await this.notificationsService.create(
+          targetUserId,
+          'Shartnoma bekor qilindi',
+          `#ESC-${saved.id} shartnomasi bekor qilindi.${
+            heldStates.includes(saved.status) ? '' : ''
+          }`,
+          'contract_update',
+          saved.id.toString(),
+        );
+      }
+
+      return saved;
     } catch (error) {
       this.logger.error(`Cancel Error: ${error}`);
       throw error;

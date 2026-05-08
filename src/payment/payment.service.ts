@@ -279,7 +279,7 @@ export class PaymentService {
 
   private buildExternalId(
     contractId: string | number,
-    action: 'hold' | 'payout' | 'charge',
+    action: 'hold' | 'payout' | 'charge' | 'dismiss',
   ): string {
     return `escro_${action}_contract_${contractId}`;
   }
@@ -618,27 +618,59 @@ export class PaymentService {
     }
   }
 
-  async cancelHold(transactionId: string) {
+  async cancelHold(transactionId: string, contractId?: string | number) {
     try {
-      const tx = await this.txRepository.findOne({
+      const holdTx = await this.txRepository.findOne({
         where: {
           paylovTransactionId: transactionId,
           type: TransactionType.HOLD,
         },
       });
 
+      // Always store a separate DISMISS row so the timeline reads
+      // "Muzlatildi → Qaytarildi" as two events. extId makes the operation
+      // idempotent: a double-click reuses the same row.
+      const cid = contractId ?? holdTx?.contractId;
+      const externalId = cid
+        ? this.buildExternalId(cid, 'dismiss')
+        : `escro_dismiss_tx_${transactionId}`;
+      const dismissTx = await this.upsertTx({
+        type: TransactionType.DISMISS,
+        contractId:
+          typeof cid === 'number'
+            ? cid
+            : cid
+              ? Number(cid)
+              : holdTx?.contractId,
+        userId: holdTx?.userId,
+        cardId: holdTx?.cardId,
+        extId: externalId,
+        amountTiyin: holdTx ? Number(holdTx.amount) : 0,
+      });
+
+      // Idempotency: if Paylov already confirmed dismiss for this contract,
+      // don't hit them again — return the cached result.
+      if (dismissTx.status === TransactionStatus.DISMISSED) {
+        return {
+          result: dismissTx.rawResponse?.result ?? { status: 'cancelled' },
+          error: null,
+        };
+      }
+
       const { data } = await this.client.post('/payment/hold/dismiss/', {
         transactionId,
       });
 
-      if (tx) {
-        tx.status = data?.result
-          ? TransactionStatus.DISMISSED
-          : TransactionStatus.FAILED;
-        tx.rawResponse = data;
-        if (!data?.result) tx.lastError = data?.error ?? data;
-        await this.txRepository.save(tx);
+      dismissTx.rawResponse = data;
+      dismissTx.paylovTransactionId = transactionId; // reference to the original hold
+      if (data?.result) {
+        dismissTx.status = TransactionStatus.DISMISSED;
+        dismissTx.lastError = null as any;
+      } else {
+        dismissTx.status = TransactionStatus.FAILED;
+        dismissTx.lastError = data?.error ?? data;
       }
+      await this.txRepository.save(dismissTx);
 
       return data;
     } catch (error) {
