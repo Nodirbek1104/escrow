@@ -252,7 +252,14 @@ async verifyOtp(dto: VerifyOtpDto) {
     if (!botToken) {
       throw new InternalServerErrorException('TG_BOT_TOKEN sozlanmagan');
     }
-    const parsed = verifyTelegramInitData(initData, botToken);
+    let parsed;
+    try {
+      parsed = verifyTelegramInitData(initData, botToken);
+    } catch (err) {
+      throw new BadRequestException(
+        `Telegram initData noto'g'ri: ${(err as Error).message}`,
+      );
+    }
     if (!parsed.user?.id) {
       throw new BadRequestException("initData ichida user.id yo'q");
     }
