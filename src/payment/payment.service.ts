@@ -485,19 +485,17 @@ export class PaymentService {
 
   async getMyCards(userId: number) {
     try {
-      const cards = await this.cardRepository.find({
-        where: { userId },
-        order: { createdAt: 'DESC' },
-      });
-      // Frontend Paylov javob shakli ({result: {cards}, error}) ni kutadi —
-      // shu sababli lokal DB javobini ham xuddi shunday o'rab qaytaramiz.
-      return { result: { cards }, error: null };
+      // Docs: GET /merchant/userCard/getAllUserCards/?userId=<id>
+      // Paylov javobi {result: {cards: [...]}} shaklida keladi — frontend
+      // aynan shu shaklni kutadi.
+      const { data } = await this.client.get(
+        '/merchant/userCard/getAllUserCards/',
+        { params: { userId: String(userId) } },
+      );
+      return data;
     } catch (error) {
-      this.logger.error(`getMyCards: ${error}`);
-      return {
-        result: { cards: [] },
-        error: { code: 'internal_error', message: (error as Error).message },
-      };
+      this.logger.error(`Paylov getAllUserCards: ${error}`);
+      return handlePaymentError(error);
     }
   }
 
