@@ -32,10 +32,14 @@ dotenv.config();
         : join(__dirname, '..', 'uploads'),
       exclude: ['/api*'],
     }),
-    ThrottlerModule.forRoot([{
-      ttl: 60000,
-      limit: 15,
-    }]),
+    // Named throttler buckets. Routes can opt into a stricter one via
+    // @Throttle({ <name>: { limit, ttl } }). The 'default' bucket applies
+    // when a route doesn't specify anything.
+    ThrottlerModule.forRoot([
+      { name: 'default', ttl: 60_000, limit: 60 },
+      { name: 'auth', ttl: 60_000, limit: 10 },
+      { name: 'otp', ttl: 60_000, limit: 3 },
+    ]),
     RedisModule.forRoot({
       type: 'single',
       url: 'redis://localhost:6379'

@@ -206,21 +206,46 @@ async verifyOtp(dto: VerifyOtpDto) {
   // 3. Login (Parolni tekshirish)
   async login(dto: LoginDto) {
   const phone = this.normalizePhone(dto.phoneNumber);
+  const failKey = `login_fail:${phone}`;
+
+  // Bruteforce check: 5 failed attempts within 15 minutes locks the
+  // account; the counter clears automatically when the window expires.
+  const fails = Number(await this.redis.get(failKey)) || 0;
+  if (fails >= 5) {
+    const ttl = await this.redis.ttl(failKey);
+    const minutes = Math.max(1, Math.ceil((ttl > 0 ? ttl : 900) / 60));
+    throw new UnauthorizedException(
+      `Hisob ${minutes} daqiqaga vaqtincha bloklandi. Keyinroq urinib ko'ring.`,
+    );
+  }
+
   const user = await this.userRepository.createQueryBuilder("user")
     .addSelect("user.password")
     .where("user.phoneNumber = :phone", { phone })
     .getOne();
   if (!user || !user.isVerified) {
+    await this.recordLoginFailure(failKey);
     throw new UnauthorizedException("Foydalanuvchi topilmadi yoki tasdiqlanmagan");
   }
 
   const isMatch = await bcrypt.compare(dto.password, user.password);
   if (!isMatch) {
+    await this.recordLoginFailure(failKey);
     throw new UnauthorizedException("Telefon raqami yoki parol noto'g'ri");
   }
 
+  // Successful login — drop the counter.
+  await this.redis.del(failKey).catch(() => undefined);
+
   return this.issueAuth(user);
 }
+
+  private async recordLoginFailure(key: string): Promise<void> {
+    const next = await this.redis.incr(key);
+    if (next === 1) {
+      await this.redis.expire(key, 900); // 15 min lockout window
+    }
+  }
 
   private issueAuth(user: User) {
     const payload = {
