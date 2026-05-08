@@ -8,7 +8,11 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
-import { EscrowContract, EscrowStatus } from './entities/escrocontract.entity';
+import {
+  CreatorRole,
+  EscrowContract,
+  EscrowStatus,
+} from './entities/escrocontract.entity';
 import { CreateEscrowContractDto } from './dto/create-escrocontract.dto';
 import { User } from '../user/entities/user.entity';
 import { SmsService } from '../user/send.sms.service'; 
@@ -45,6 +49,43 @@ export class EscrocontractsService {
     private readonly messagesService: MessagesService,
     @InjectRedis() private readonly redis: Redis,
   ) {}
+
+  // ─── ROLE HELPERS ────────────────────────────────────────────────────────
+  /** Buyer userId for either flow: creator if buyer-created, otherwise the
+   *  invitee that has already accepted. May be null if invitee not registered. */
+  private getBuyerId(c: EscrowContract): number | null {
+    return c.creatorRole === CreatorRole.EXECUTOR
+      ? (c.executorId ?? null)
+      : c.creatorId;
+  }
+
+  /** Executor userId for either flow: creator if executor-created, otherwise
+   *  the invitee that has already accepted. */
+  private getExecutorId(c: EscrowContract): number | null {
+    return c.creatorRole === CreatorRole.EXECUTOR
+      ? c.creatorId
+      : (c.executorId ?? null);
+  }
+
+  /** True when `user` is the buyer of this contract (creator or invitee). */
+  private isBuyerActing(c: EscrowContract, user: any): boolean {
+    if (c.creatorRole === CreatorRole.BUYER) return user.userId === c.creatorId;
+    // executor-created: buyer is the invitee
+    if (c.executorId && user.userId === c.executorId) return true;
+    const phone = String(user.phoneNumber ?? '').replace(/\D/g, '');
+    const invitee = String(c.executorPhoneNumber ?? '').replace(/\D/g, '');
+    return !!(phone && phone === invitee);
+  }
+
+  /** True when `user` is the executor of this contract. */
+  private isExecutorActing(c: EscrowContract, user: any): boolean {
+    if (c.creatorRole === CreatorRole.EXECUTOR) return user.userId === c.creatorId;
+    // buyer-created: executor is the invitee
+    if (c.executorId && user.userId === c.executorId) return true;
+    const phone = String(user.phoneNumber ?? '').replace(/\D/g, '');
+    const invitee = String(c.executorPhoneNumber ?? '').replace(/\D/g, '');
+    return !!(phone && phone === invitee);
+  }
 
   /** System message text for the given new status; null = don't post one. */
   private systemMessageFor(status: string): string | null {
@@ -102,12 +143,40 @@ export class EscrocontractsService {
   async create(dto: CreateEscrowContractDto, user: any, filePath?: string) {
     try {
       const commissionAmount = computeCommission(Number(dto.amount));
+      const role = dto.creatorRole ?? CreatorRole.BUYER;
+
+      // Executor-created (Offer) flow: creator pre-selects the payout card
+      // because they're the one who will receive funds. Verify ownership.
+      let receiverCardId: string | null = null;
+      if (role === CreatorRole.EXECUTOR) {
+        if (!dto.receiverCardId) {
+          throw new BadRequestException(
+            'Ijrochi sifatida yaratganda pul qabul qiluvchi kartani tanlash shart',
+          );
+        }
+        const myCardsResp = await this.paymentService.getMyCards(user.userId);
+        const myCards = myCardsResp?.result?.cards ?? [];
+        if (!myCards.some((c: any) => c.cardId === dto.receiverCardId)) {
+          throw new ForbiddenException('Tanlangan karta sizga tegishli emas');
+        }
+        receiverCardId = dto.receiverCardId;
+      }
+
       const contract = this.contractRepo.create({
-        ...dto,
+        title: dto.title,
+        amount: dto.amount,
+        deadline: dto.deadline,
+        executorPhoneNumber: dto.executorPhoneNumber,
         commissionAmount,
         technicalTermsFile: filePath,
         status: EscrowStatus.PENDING,
-        creatorId: user.userId, // Creator = xaridor (buyer); ijrochi taklif qilinadi
+        creatorId: user.userId,
+        creatorRole: role,
+        // For executor-created contracts, the creator IS the executor and
+        // their receiver card is known up front. The `executorId` column
+        // here is reused as "invitee user id", so it stays NULL until the
+        // buyer registers/accepts.
+        ...(receiverCardId ? { receiverCardId } : {}),
       });
 
       const saved = await this.contractRepo.save(contract);
@@ -171,10 +240,23 @@ export class EscrocontractsService {
       const contract = await this.findOne(id, user);
       this.validateStatusTransition(contract.status, status);
 
-      // QOIDALAR: Xaridor (Creator) ACCEPTED qilganda pul majburiy muzlatiladi
-      if (status === EscrowStatus.ACCEPTED && user.userId === contract.creatorId) {
+      // ACCEPTED transition has two distinct meanings depending on who is
+      // acting and the contract's creatorRole:
+      //   1. Buyer acting → fund the escrow (hold). Works for both flows.
+      //      In buyer-created: creator is buyer; executor must already have
+      //      set receiverCardId.
+      //      In executor-created: invitee is buyer; receiverCardId was set
+      //      at create time; we record buyer's userId on executorId slot.
+      //   2. Executor acting (only meaningful in buyer-created flow):
+      //      pre-pay step where executor picks the receiver card.
+      if (status === EscrowStatus.ACCEPTED && this.isBuyerActing(contract, user)) {
         if (!data?.cardId) {
           throw new BadRequestException('Shartnomani tasdiqlash uchun karta kiritish shart!');
+        }
+        if (contract.creatorRole === CreatorRole.BUYER && !contract.receiverCardId) {
+          throw new BadRequestException(
+            "Avval ijrochi pul qabul qiluvchi kartani tanlashi kerak",
+          );
         }
 
         // Buyer kartasidan jami summa (kontrakt + komissiya) muzlatiladi.
@@ -189,24 +271,25 @@ export class EscrocontractsService {
         if (holdResult?.result?.transactionId) {
           contract.transactionId = holdResult.result.transactionId;
           contract.senderCardId = data.cardId;
-          contract.status = EscrowStatus.PAYMENT_HELD; // Avtomatik HELD holatiga o'tadi
+          // For executor-created flow, this is also the moment the buyer
+          // joins the contract — record their userId on the invitee slot.
+          if (contract.creatorRole === CreatorRole.EXECUTOR && !contract.executorId) {
+            contract.executorId = user.userId;
+          }
+          contract.status = EscrowStatus.PAYMENT_HELD;
         } else {
           const errMsg = holdResult?.error?.message || 'Kartada mablag\'ni muzlatishda xatolik';
           this.logger.error(`Hold failed for contract ${contract.id}: ${JSON.stringify(holdResult?.error)}`);
           throw new BadRequestException(errMsg);
         }
-      } else if (status === EscrowStatus.ACCEPTED) {
-        // Ijrochi (sotuvchi) shartnomani qabul qilmoqda.
+      } else if (status === EscrowStatus.ACCEPTED && this.isExecutorActing(contract, user)) {
+        // Executor accepting + setting receiver card (buyer-created flow).
+        if (contract.creatorRole === CreatorRole.EXECUTOR) {
+          throw new BadRequestException("Bu shartnomada qabul qilish bosqichi yo'q — xaridor to'lashini kuting");
+        }
         if (!data?.cardId) {
           throw new BadRequestException('Shartnomani qabul qilish uchun pul tushadigan kartangizni tanlang!');
         }
-        // Faqat taklif qilingan ijrochining o'zi qabul qila oladi.
-        const userPhone = String(user.phoneNumber ?? '').replace(/\D/g, '');
-        const inviteePhone = String(contract.executorPhoneNumber ?? '').replace(/\D/g, '');
-        if (userPhone !== inviteePhone) {
-          throw new ForbiddenException("Siz bu shartnomaning ijrochisi emassiz");
-        }
-        // Karta ijrochiga tegishli ekanligini tekshiramiz.
         const myCardsResp = await this.paymentService.getMyCards(user.userId);
         const myCards = myCardsResp?.result?.cards ?? [];
         const ownsCard = myCards.some((c: any) => c.cardId === data.cardId);
@@ -214,14 +297,15 @@ export class EscrocontractsService {
           throw new ForbiddenException('Tanlangan karta sizga tegishli emas');
         }
         contract.receiverCardId = data.cardId;
-        contract.executorId = user.userId; // notification + ownership audit
+        contract.executorId = user.userId;
         contract.status = EscrowStatus.ACCEPTED;
       }
 
       // Shartnoma yakunlanganda pulni o'tkazish
       if (status === EscrowStatus.COMPLETED) {
         const isAdmin = user.role === 'admin' || user.role === 'super_admin';
-        if (!isAdmin && contract.creatorId !== user.userId) {
+        const buyerId = this.getBuyerId(contract);
+        if (!isAdmin && buyerId !== user.userId) {
           throw new ForbiddenException('Faqat xaridor yoki Admin yopishi mumkin');
         }
         if (!contract.transactionId) {
@@ -416,8 +500,10 @@ export class EscrocontractsService {
         throw new ForbiddenException('Nizodagi shartnomani faqat admin bekor qiladi');
       }
 
-      // Default: faqat xaridor (creator) bekor qila oladi (yoki admin).
-      if (!isAdmin && contract.creatorId !== user.userId) {
+      // Default: faqat xaridor bekor qila oladi (yoki admin).
+      // Xaridor — kontraktning buyerId'si (creatorRole'ga qarab).
+      const buyerId = this.getBuyerId(contract);
+      if (!isAdmin && buyerId !== user.userId) {
         throw new ForbiddenException('Bekor qilish huquqi yo‘q');
       }
 

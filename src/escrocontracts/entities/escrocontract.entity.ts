@@ -4,6 +4,11 @@ import {
 } from 'typeorm';
 import { User } from '../../user/entities/user.entity';
 
+export enum CreatorRole {
+  BUYER = 'buyer',
+  EXECUTOR = 'executor',
+}
+
 export enum EscrowStatus {
   DRAFT     = 'draft',
   PENDING   = 'pending', // Yaratildi, ijrochi tasdiqlashini kutmoqda
@@ -81,6 +86,19 @@ export class EscrowContract {
 
   @Column({ type: 'enum', enum: EscrowStatus, default: EscrowStatus.PENDING })
   status!: EscrowStatus;
+
+  /**
+   * Who created the contract: 'buyer' (default — buyer makes the offer and
+   * invites an executor) or 'executor' (executor publishes an "Offer" and
+   * invites a buyer to fund it). Affects which side has to pay vs. accept,
+   * but the rest of the flow (charge / payout / cancel) is identical.
+   */
+  @Column({
+    type: 'enum',
+    enum: CreatorRole,
+    default: CreatorRole.BUYER,
+  })
+  creatorRole!: CreatorRole;
 
   @Column()
   executorPhoneNumber!: string;
