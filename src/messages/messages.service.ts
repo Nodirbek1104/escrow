@@ -2,13 +2,17 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, MoreThan, Not, Repository } from 'typeorm';
+import axios from 'axios';
 import { Message } from './entities/message.entity';
 import { ChatRead } from './entities/chat-read.entity';
 import { EscrowContract } from '../escrocontracts/entities/escrocontract.entity';
+import { User } from '../user/entities/user.entity';
+import { ChatPresenceService } from './chat-presence.service';
 
 export interface InboxUser {
   userId: number;
@@ -16,8 +20,17 @@ export interface InboxUser {
   role?: string;
 }
 
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 @Injectable()
 export class MessagesService {
+  private readonly logger = new Logger(MessagesService.name);
+
   constructor(
     @InjectRepository(Message)
     private readonly messageRepository: Repository<Message>,
@@ -25,7 +38,73 @@ export class MessagesService {
     private readonly chatReadRepository: Repository<ChatRead>,
     @InjectRepository(EscrowContract)
     private readonly contractRepository: Repository<EscrowContract>,
+    @InjectRepository(User)
+    private readonly userRepository: Repository<User>,
+    private readonly presence: ChatPresenceService,
   ) {}
+
+  /**
+   * After a chat message is broadcast over the socket, send a Telegram bot
+   * push to every recipient who is *not currently online*. Sender is skipped;
+   * users without a linked telegramId are skipped silently. This is fire-and-
+   * forget — we don't await it from the caller's hot path.
+   */
+  async pushNotifyOfflineRecipients(
+    contractId: number,
+    senderId: number,
+    payload: { content?: string; fileUrl?: string; senderName?: string; type?: string },
+  ): Promise<void> {
+    if (payload.type === 'system') return;
+    const botToken = process.env.TG_BOT_TOKEN;
+    if (!botToken) return;
+
+    const contract = await this.contractRepository.findOne({
+      where: { id: contractId },
+    });
+    if (!contract) return;
+
+    const candidates = [contract.creatorId, contract.executorId].filter(
+      (uid): uid is number => typeof uid === 'number' && uid > 0 && uid !== senderId,
+    );
+    if (candidates.length === 0) return;
+
+    const users = await this.userRepository.find({ where: { id: In(candidates) } });
+    const offlineWithTg = users.filter(
+      (u) => u?.telegramId && !this.presence.isOnline(u.id),
+    );
+    if (offlineWithTg.length === 0) return;
+
+    const frontend = process.env.FRONTEND_URL ?? 'https://aws-dev.escro.uz';
+    const preview = payload.fileUrl
+      ? '📎 Fayl'
+      : (payload.content ?? '').slice(0, 200);
+    const senderLabel = payload.senderName || 'Yangi xabar';
+    const text =
+      `<b>${escapeHtml(senderLabel)}</b>\n` +
+      `${escapeHtml(preview)}\n\n` +
+      `<a href="${frontend}/app/contracts/${contractId}">Ochish</a>`;
+
+    await Promise.all(
+      offlineWithTg.map(async (u) => {
+        try {
+          await axios.post(
+            `https://api.telegram.org/bot${botToken}/sendMessage`,
+            {
+              chat_id: u.telegramId,
+              text,
+              parse_mode: 'HTML',
+              disable_web_page_preview: true,
+            },
+            { timeout: 8_000 },
+          );
+        } catch (err: any) {
+          this.logger.warn(
+            `TG push fail for user ${u.id}: ${err?.response?.data?.description ?? err?.message}`,
+          );
+        }
+      }),
+    );
+  }
 
   async create(
     contractId: number,
@@ -179,6 +258,65 @@ export class MessagesService {
     );
 
     return rows;
+  }
+
+  /** Pin a message in the contract chat. Any participant or admin may pin. */
+  async pinMessage(
+    contractId: number,
+    messageId: number,
+    user: { userId: number; phoneNumber?: string; role?: string },
+  ) {
+    const contract = await this.contractRepository.findOne({
+      where: { id: contractId },
+    });
+    if (!contract) throw new NotFoundException('Shartnoma topilmadi');
+    this.assertContractParticipant(contract, user);
+
+    const m = await this.messageRepository.findOne({
+      where: { id: messageId },
+    });
+    if (!m || m.contractId !== contractId) {
+      throw new NotFoundException('Xabar topilmadi');
+    }
+    if (m.deletedAt) {
+      throw new BadRequestException("O'chirilgan xabarni qatirib bo'lmaydi");
+    }
+
+    contract.pinnedMessageId = messageId;
+    await this.contractRepository.save(contract);
+    return { ok: true, pinnedMessageId: messageId };
+  }
+
+  async unpinMessage(
+    contractId: number,
+    user: { userId: number; phoneNumber?: string; role?: string },
+  ) {
+    const contract = await this.contractRepository.findOne({
+      where: { id: contractId },
+    });
+    if (!contract) throw new NotFoundException('Shartnoma topilmadi');
+    this.assertContractParticipant(contract, user);
+
+    contract.pinnedMessageId = null;
+    await this.contractRepository.save(contract);
+    return { ok: true };
+  }
+
+  private assertContractParticipant(
+    contract: EscrowContract,
+    user: { userId: number; phoneNumber?: string; role?: string },
+  ) {
+    const isAdmin = user.role === 'admin' || user.role === 'super_admin';
+    if (isAdmin) return;
+    const phoneDigits = (user.phoneNumber ?? '').replace(/\D/g, '');
+    const inviteeDigits = String(contract.executorPhoneNumber ?? '').replace(/\D/g, '');
+    const isCreator = contract.creatorId === user.userId;
+    const isExecutor =
+      contract.executorId === user.userId ||
+      (phoneDigits && phoneDigits === inviteeDigits);
+    if (!isCreator && !isExecutor) {
+      throw new ForbiddenException("Siz bu shartnomaning ishtirokchisi emassiz");
+    }
   }
 
   /** Edit own user message. Cannot edit system or deleted messages. */

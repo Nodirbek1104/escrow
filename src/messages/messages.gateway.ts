@@ -7,6 +7,7 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { MessagesService } from './messages.service';
+import { ChatPresenceService } from './chat-presence.service';
 import { JwtService } from '@nestjs/jwt';
 import { UnauthorizedException } from '@nestjs/common';
 
@@ -25,6 +26,7 @@ export class MessagesGateway {
 
   constructor(
     private readonly messagesService: MessagesService,
+    private readonly presence: ChatPresenceService,
     private readonly jwtService: JwtService,
   ) {}
 
@@ -32,15 +34,26 @@ export class MessagesGateway {
     try {
       const token = client.handshake.auth.token || client.handshake.headers.token;
       if (!token) throw new UnauthorizedException();
-      
+
       const payload = this.jwtService.verify(token);
       client.data.user = payload;
-      
+      // sub on the JWT payload is the user id (number).
+      const userId = Number(payload.sub);
+      if (Number.isFinite(userId)) {
+        this.presence.add(userId, client.id);
+        client.data.userId = userId;
+      }
+
       // Join room for the user to receive private notifications or join contract rooms later
       this.server.to(client.id).emit('connected', { userId: payload.sub });
     } catch (e) {
       client.disconnect();
     }
+  }
+
+  async handleDisconnect(client: Socket) {
+    const uid = Number(client.data?.userId);
+    if (Number.isFinite(uid)) this.presence.remove(uid, client.id);
   }
 
   @SubscribeMessage('joinContract')
@@ -110,6 +123,18 @@ export class MessagesGateway {
         fullName: user.fullName || 'User',
       },
     });
+
+    // Telegram push for offline recipients (fire-and-forget).
+    void this.messagesService.pushNotifyOfflineRecipients(
+      data.contractId,
+      user.sub,
+      {
+        content: data.content,
+        fileUrl: data.fileUrl,
+        senderName: user.fullName,
+        type: 'user',
+      },
+    );
 
     return savedMessage;
   }

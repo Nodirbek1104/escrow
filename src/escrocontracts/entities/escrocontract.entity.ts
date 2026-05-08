@@ -64,6 +64,10 @@ export class EscrowContract {
 
   @Column({ nullable: true })
   executorId?: number;
+
+  /** Pinned message id for the contract chat (Telegram-style sticky). */
+  @Column({ type: 'integer', nullable: true })
+  pinnedMessageId?: number | null;
   // --------------------------------------------
 
   @Column({ nullable: true })

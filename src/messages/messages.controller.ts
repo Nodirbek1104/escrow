@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Controller,
+  Delete,
   Get,
   Param,
   Post,
@@ -54,6 +55,27 @@ export class MessagesController {
   @UseGuards(JwtAuthGuard, TelegramGuard)
   async markRead(@Req() req: any, @Param('id', ParseIntPipe) id: number) {
     return this.messagesService.markRead(req.user.userId, id);
+  }
+
+  /** Pin a specific message at the top of the contract chat. */
+  @Post('contract/:id/pin/:messageId')
+  @UseGuards(JwtAuthGuard, TelegramGuard)
+  async pinMessage(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('messageId', ParseIntPipe) messageId: number,
+  ) {
+    return this.messagesService.pinMessage(id, messageId, req.user);
+  }
+
+  /** Clear the pinned message for the contract chat. */
+  @Delete('contract/:id/pin')
+  @UseGuards(JwtAuthGuard, TelegramGuard)
+  async unpinMessage(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
+    return this.messagesService.unpinMessage(id, req.user);
   }
 
   /** Upload a single file (image or PDF) for a chat. Returns a URL to be
