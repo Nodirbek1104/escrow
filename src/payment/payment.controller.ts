@@ -5,6 +5,8 @@ import {
   Body,
   Param,
   Delete,
+  Query,
+  Res,
   UseGuards,
   Req,
   HttpCode,
@@ -14,6 +16,7 @@ import {
   Headers,
   ParseIntPipe,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { PaymentService } from './payment.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AdminGuard } from '../auth/guards/admin.guard';
@@ -140,6 +143,31 @@ export class PaymentController {
     @Param('contractId', ParseIntPipe) contractId: number,
   ) {
     return this.paymentService.getTransactionsByContract(contractId, req.user);
+  }
+
+  /** ADMIN: payment transactions CSV export (optional from/to/type/status). */
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  @Get('admin/transactions/export.csv')
+  async exportTransactionsCsv(
+    @Res() res: Response,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('type') type?: string,
+    @Query('status') status?: string,
+  ) {
+    const csv = await this.paymentService.exportTransactionsCsv({
+      from,
+      to,
+      type,
+      status,
+    });
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="escro-transactions-${stamp}.csv"`,
+    );
+    res.send(csv);
   }
 
   // ─── PAYLOV WEBHOOK (ochiq endpoint) ─────────────────────────────────────────

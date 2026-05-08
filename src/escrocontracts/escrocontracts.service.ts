@@ -23,6 +23,7 @@ import {
   getCommissionPercent,
   totalCharge,
 } from './commission';
+import { buildCsv } from '../common/csv';
 import { error } from 'console';
 
 const INVITE_TTL = 60 * 60 * 24; // 24 soat
@@ -552,6 +553,58 @@ async getContractByToken(token: string, user: any) {
       relations: ['creator'],
       order: { createdAt: 'DESC' },
     });
+  }
+
+  /** Build a CSV string of all contracts in the given date window. */
+  async exportContractsCsv(filters: { from?: string; to?: string; status?: string }): Promise<string> {
+    const qb = this.contractRepo
+      .createQueryBuilder('c')
+      .leftJoinAndSelect('c.creator', 'creator')
+      .orderBy('c.createdAt', 'DESC');
+    if (filters.from) qb.andWhere('c."createdAt" >= :from', { from: filters.from });
+    if (filters.to) qb.andWhere('c."createdAt" <= :to', { to: filters.to });
+    if (filters.status) qb.andWhere('c.status = :status', { status: filters.status });
+    const rows = await qb.getMany();
+
+    const headers = [
+      'id',
+      'title',
+      'status',
+      'amount',
+      'commission',
+      'total',
+      'creator_name',
+      'creator_phone',
+      'executor_phone',
+      'executor_id',
+      'paylov_tx_id',
+      'sender_card',
+      'receiver_card',
+      'pinned_msg_id',
+      'deadline_days',
+      'created_at',
+      'rejection_reason',
+    ];
+    const data = rows.map((c) => [
+      c.id,
+      c.title,
+      c.status,
+      Number(c.amount),
+      Number(c.commissionAmount ?? 0),
+      Number(c.amount) + Number(c.commissionAmount ?? 0),
+      c.creator?.fullName ?? '',
+      c.creator?.phoneNumber ?? '',
+      c.executorPhoneNumber,
+      c.executorId ?? '',
+      c.transactionId ?? '',
+      c.senderCardId ?? '',
+      c.receiverCardId ?? '',
+      c.pinnedMessageId ?? '',
+      c.deadline ?? '',
+      c.createdAt,
+      c.rejectionReason ?? '',
+    ]);
+    return buildCsv(headers, data);
   }
 
   /**

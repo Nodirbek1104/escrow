@@ -18,6 +18,7 @@ import {
 } from './entities/transaction.entity';
 import { EscrowContract } from '../escrocontracts/entities/escrocontract.entity';
 import { handlePaymentError } from './utils/payment-error.handler';
+import { buildCsv } from '../common/csv';
 import { ConfigService } from '@nestjs/config';
 
 interface CachedToken {
@@ -1021,5 +1022,52 @@ export class PaymentService {
       where: { contractId },
       order: { createdAt: 'ASC' },
     });
+  }
+
+  /** Build a CSV of payment transactions in the given window. Admin-only. */
+  async exportTransactionsCsv(filters: {
+    from?: string;
+    to?: string;
+    type?: string;
+    status?: string;
+  }): Promise<string> {
+    const qb = this.txRepository
+      .createQueryBuilder('t')
+      .orderBy('t.createdAt', 'DESC');
+    if (filters.from) qb.andWhere('t."createdAt" >= :from', { from: filters.from });
+    if (filters.to) qb.andWhere('t."createdAt" <= :to', { to: filters.to });
+    if (filters.type) qb.andWhere('t.type = :type', { type: filters.type });
+    if (filters.status) qb.andWhere('t.status = :status', { status: filters.status });
+    const rows = await qb.getMany();
+
+    const headers = [
+      'id',
+      'contract_id',
+      'type',
+      'status',
+      'amount',
+      'paylov_tx_id',
+      'ext_id',
+      'card_id',
+      'user_id',
+      'created_at',
+      'updated_at',
+      'last_error',
+    ];
+    const data = rows.map((t) => [
+      t.id,
+      t.contractId ?? '',
+      t.type,
+      t.status,
+      Number(t.amount),
+      t.paylovTransactionId ?? '',
+      t.extId ?? '',
+      t.cardId ?? '',
+      t.userId ?? '',
+      t.createdAt,
+      t.updatedAt,
+      t.lastError ? JSON.stringify(t.lastError) : '',
+    ]);
+    return buildCsv(headers, data);
   }
 }

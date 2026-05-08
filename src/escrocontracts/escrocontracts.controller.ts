@@ -6,12 +6,15 @@ import {
   Patch,
   Param,
   Delete,
+  Query,
+  Res,
   UseGuards,
   Req,
   UploadedFile,
   UseInterceptors,
   ParseIntPipe,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { EscrocontractsService } from './escrocontracts.service';
 import { CreateEscrowContractDto } from './dto/create-escrocontract.dto';
@@ -116,6 +119,29 @@ export class EscrocontractsController {
   @UseGuards(JwtAuthGuard, AdminGuard)
   async financeSummary() {
     return this.escrowService.getFinanceSummary();
+  }
+
+  // 9c. ADMIN: contracts CSV export (optional from / to / status filters)
+  @Get('admin/export.csv')
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  async exportContractsCsv(
+    @Res() res: Response,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('status') status?: string,
+  ) {
+    const csv = await this.escrowService.exportContractsCsv({
+      from,
+      to,
+      status,
+    });
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="escro-contracts-${stamp}.csv"`,
+    );
+    res.send(csv);
   }
 
   // 7. FIND ONE (Dinamik :id oxirida bo'lishi xavfsizroq)
