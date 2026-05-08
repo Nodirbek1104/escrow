@@ -62,6 +62,23 @@ export class MessagesGateway {
     this.server.to(`contract_${contractId}`).emit(event, payload);
   }
 
+  /** Broadcast a typing indicator to everyone in the contract room except
+   *  the sender. Frontend debounces emits client-side. */
+  @SubscribeMessage('typing')
+  handleTyping(
+    @MessageBody() data: { contractId: number },
+    @ConnectedSocket() client: Socket,
+  ) {
+    const user = client.data.user;
+    if (!user || !data?.contractId) return;
+    client.to(`contract_${data.contractId}`).emit('userTyping', {
+      contractId: data.contractId,
+      userId: user.sub,
+      fullName: user.fullName,
+      at: Date.now(),
+    });
+  }
+
   @SubscribeMessage('sendMessage')
   async handleMessage(
     @MessageBody() data: { contractId: number; content: string; fileUrl?: string },
