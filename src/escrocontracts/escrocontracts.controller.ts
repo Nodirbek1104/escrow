@@ -131,4 +131,11 @@ export class EscrocontractsController {
   async cancel(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
     return this.escrowService.cancel(id, req.user);
   }
+
+  // 10. ADMIN: retry a failed payout (after auto-flow charged but a2c failed)
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  @Post(':id/retry-payout')
+  async retryPayout(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+    return this.escrowService.retryPayout(id, req.user);
+  }
 }

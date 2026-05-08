@@ -329,6 +329,71 @@ export class EscrocontractsService {
     };
   }
 
+  /**
+   * Admin-only: re-attempt a failed payout. Used when the auto-flow charged
+   * funds successfully but the a2c payout to the executor's card failed
+   * (which automatically marks the contract DISPUTED). The Paylov call is
+   * idempotent via extId, so retrying is safe.
+   */
+  async retryPayout(id: number, user: any) {
+    const contract = await this.findOne(id, user);
+    const isAdmin = user.role === 'admin' || user.role === 'super_admin';
+    if (!isAdmin) {
+      throw new ForbiddenException('Faqat admin payoutni qayta urinishi mumkin');
+    }
+    if (contract.status !== EscrowStatus.DISPUTED) {
+      throw new BadRequestException(
+        'Payout retry faqat DISPUTED holatda ishlaydi',
+      );
+    }
+    if (!contract.transactionId) {
+      throw new BadRequestException(
+        'Bu shartnomada charge tranzaksiyasi yo\'q (avval to\'lov muzlatilishi kerak)',
+      );
+    }
+    if (!contract.receiverCardId) {
+      throw new BadRequestException(
+        'Ijrochining qabul qiluvchi kartasi belgilanmagan',
+      );
+    }
+
+    const payoutRes = await this.paymentService.payoutToCard(
+      contract.receiverCardId,
+      contract.amount,
+      contract.id.toString(),
+    );
+    if (!payoutRes?.result) {
+      const errMsg = payoutRes?.error?.message || 'Payout retry muvaffaqiyatsiz';
+      this.logger.error(
+        `retryPayout failed for contract ${contract.id}: ${JSON.stringify(payoutRes?.error)}`,
+      );
+      contract.rejectionReason = `Payout retry xatosi: ${errMsg}`;
+      await this.contractRepo.save(contract);
+      throw new BadRequestException(errMsg);
+    }
+
+    contract.status = EscrowStatus.COMPLETED;
+    contract.rejectionReason = null;
+    const saved = await this.contractRepo.save(contract);
+
+    // Notify both parties.
+    const targets = [saved.creatorId, saved.executorId].filter(
+      (uid): uid is number => typeof uid === 'number' && uid !== user.userId,
+    );
+    for (const targetUserId of targets) {
+      await this.notificationsService.create(
+        targetUserId,
+        "Mablag' ijrochiga o'tkazildi",
+        `#ESC-${saved.id} shartnomasi yakunlandi (admin tomonidan payout qayta urinildi).`,
+        'contract_update',
+        saved.id.toString(),
+      );
+    }
+
+    await this.emitContractUpdated(saved);
+    return saved;
+  }
+
   // ─── 5. BEKOR QILISH (UNHOLD BILAN) ────────────────────────────────────────
   async cancel(id: number, user: any) {
     try {
