@@ -43,12 +43,13 @@ export class EscrocontractsService {
         ...dto,
         technicalTermsFile: filePath,
         status: EscrowStatus.PENDING,
-        creatorId: user.userId, // Shartnomani boshlagan odam (ijrochi)
+        creatorId: user.userId, // Creator = xaridor (buyer); ijrochi taklif qilinadi
       });
 
       const saved = await this.contractRepo.save(contract);
-      const token = await this.sendInviteSms(saved.id, dto.executorPhoneNumber);
-      
+      const token = await this.sendInviteSms(saved, dto.executorPhoneNumber);
+      const inviteLink = `${FRONTEND_URL}/invite/${token}`;
+
       // Notify creator (Success)
       await this.notificationsService.create(
         user.userId,
@@ -58,7 +59,7 @@ export class EscrocontractsService {
         saved.id.toString()
       );
 
-      return { ...saved, inviteToken: token };
+      return { ...saved, inviteToken: token, inviteLink };
     } catch (error) {
       this.logger.error(`Create Error: ${error}`);
       throw error;
@@ -127,11 +128,17 @@ export class EscrocontractsService {
           throw new BadRequestException(errMsg);
         }
       } else if (status === EscrowStatus.ACCEPTED) {
-        // Agar ijrochi (sotuvchi) qabul qilayotgan bo'lsa
+        // Ijrochi (sotuvchi) shartnomani qabul qilmoqda.
         if (!data?.cardId) {
           throw new BadRequestException('Shartnomani qabul qilish uchun pul tushadigan kartangizni tanlang!');
         }
-        // Karta ijrochiga tegishli ekanligini tekshiramiz (PaymentService ichida)
+        // Faqat taklif qilingan ijrochining o'zi qabul qila oladi.
+        const userPhone = String(user.phoneNumber ?? '').replace(/\D/g, '');
+        const inviteePhone = String(contract.executorPhoneNumber ?? '').replace(/\D/g, '');
+        if (userPhone !== inviteePhone) {
+          throw new ForbiddenException("Siz bu shartnomaning ijrochisi emassiz");
+        }
+        // Karta ijrochiga tegishli ekanligini tekshiramiz.
         const myCardsResp = await this.paymentService.getMyCards(user.userId);
         const myCards = myCardsResp?.result?.cards ?? [];
         const ownsCard = myCards.some((c: any) => c.cardId === data.cardId);
@@ -139,6 +146,7 @@ export class EscrocontractsService {
           throw new ForbiddenException('Tanlangan karta sizga tegishli emas');
         }
         contract.receiverCardId = data.cardId;
+        contract.executorId = user.userId; // notification + ownership audit
         contract.status = EscrowStatus.ACCEPTED;
       }
 
@@ -265,15 +273,30 @@ export class EscrocontractsService {
   }
 
   // ─── YORDAMCHI METODLAR ───────────────────────────────────────────────────
-  private async sendInviteSms(contractId: number, phone: string) {
+  private async sendInviteSms(contract: EscrowContract, phone: string) {
     const token = uuidv4();
-    await this.redis.setex(`contract_invite:${token}`, INVITE_TTL, JSON.stringify({ contractId, phone }));
-    
+    await this.redis.setex(
+      `contract_invite:${token}`,
+      INVITE_TTL,
+      JSON.stringify({ contractId: contract.id, phone }),
+    );
+
     const inviteLink = `${FRONTEND_URL}/invite/${token}`;
-    try { 
-      await this.smsService.send(phone, `Bu Eskiz dan test`); 
+    const amountFmt = new Intl.NumberFormat('uz-UZ').format(
+      Math.round(contract.amount),
+    );
+    const message =
+      `ESCRO platformasida sizga "${contract.title}" shartnomasi taklif qilindi (${amountFmt} so'm). ` +
+      `Tasdiqlash uchun: ${inviteLink}`;
+
+    this.logger.log(`Invite link for ${phone}: ${inviteLink}`);
+
+    try {
+      await this.smsService.send(phone, message);
     } catch (error) {
-      this.logger.error(`SMS yuborishda xato: ${error}`);
+      this.logger.warn(
+        `SMS jo'natilmadi (${phone}): ${(error as Error).message}. Invite link API javobida qaytariladi.`,
+      );
     }
     return token;
   }
