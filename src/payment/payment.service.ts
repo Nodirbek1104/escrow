@@ -340,7 +340,14 @@ export class PaymentService {
         throw new BadRequestException('Foydalanuvchi ID-si taqdim etilmadi');
       }
 
-      const cleanCard = cardNumber.replace(/\s+/g, '');
+      // Paylov barcha non-raqam belgilarni rad etadi — har ehtimolga
+      // qarshi yana bir bor tozalaymiz va uzunlikni tekshiramiz.
+      const cleanCard = cardNumber.replace(/\D/g, '');
+      if (cleanCard.length < 13 || cleanCard.length > 19) {
+        throw new BadRequestException(
+          "Karta raqami 13–19 ta raqamdan iborat bo'lishi kerak",
+        );
+      }
       // Paylov docs (createUserCard): expireDate YYMM formatida bo'lishi shart.
       // Frontend "MM/YY" yoki "MMYY" yuborishi mumkin (CreateCardDto regex shu).
       const expDigits = expireDate.replace(/\D/g, '');
