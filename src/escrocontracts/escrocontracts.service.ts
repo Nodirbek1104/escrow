@@ -425,6 +425,54 @@ async getContractByToken(token: string, user: any) {
       order: { createdAt: 'DESC' },
     });
   }
+
+  /**
+   * Admin finance summary: how much money is currently parked in escrow,
+   * how much commission has been earned vs is still pending, and a count
+   * of contracts in each status.
+   */
+  async getFinanceSummary() {
+    const all = await this.contractRepo.find({
+      select: ['id', 'status', 'amount', 'commissionAmount'],
+    });
+
+    const heldStatuses = new Set([
+      EscrowStatus.PAYMENT_HELD,
+      EscrowStatus.ACTIVE,
+      EscrowStatus.DISPUTED,
+    ]);
+    const settledStatuses = new Set([EscrowStatus.COMPLETED]);
+
+    let heldAmount = 0; // amount + commission stuck in escrow
+    let commissionPending = 0; // commission earnable on currently held contracts
+    let commissionCollected = 0; // commission booked on completed contracts
+    let activeContracts = 0;
+
+    const statusCounts: Record<string, number> = {};
+
+    for (const c of all) {
+      const amt = Number(c.amount ?? 0);
+      const com = Number(c.commissionAmount ?? 0);
+      statusCounts[c.status] = (statusCounts[c.status] ?? 0) + 1;
+      if (heldStatuses.has(c.status)) {
+        heldAmount += amt + com;
+        commissionPending += com;
+        activeContracts += 1;
+      } else if (settledStatuses.has(c.status)) {
+        commissionCollected += com;
+      }
+    }
+
+    return {
+      heldAmount,
+      commissionPending,
+      commissionCollected,
+      activeContracts,
+      totalContracts: all.length,
+      statusCounts,
+      generatedAt: new Date().toISOString(),
+    };
+  }
   // ─── UPDATE METODI ─────────────────────────────────────────────────────────
 async update(id: number, dto: any, user: any, filePath?: string) {
   try {

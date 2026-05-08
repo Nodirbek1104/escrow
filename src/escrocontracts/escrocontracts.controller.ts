@@ -111,6 +111,13 @@ export class EscrocontractsController {
     return this.escrowService.findAllAdmin();
   }
 
+  // 9b. ADMIN: FINANCE SUMMARY (held liability, commission, status counts)
+  @Get('admin/finance-summary')
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  async financeSummary() {
+    return this.escrowService.getFinanceSummary();
+  }
+
   // 7. FIND ONE (Dinamik :id oxirida bo'lishi xavfsizroq)
   @UseGuards(JwtAuthGuard)
   @Get(':id')
