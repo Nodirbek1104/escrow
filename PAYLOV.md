@@ -426,22 +426,27 @@ pm2 restart escrow-api
 
 ---
 
-## 8. Hozirgi muammo (2026-05-08 holatiga)
+## 8. Status (2026-05-08, 22:30 UTC — sandbox AKTIV)
 
-OAuth2 password grant `invalid_grant: Invalid credentials or this account
-not activated` qaytarmoqda. Bu **bizning kod muammosi emas**:
+OAuth2 ishlamoqda. Paylov support yangi onboarding token yubordi
+(`_iIix4aLJWtNBKQHm_TX4EmYTB1Gq6FLaOTEvGwm4B0`), eski credentials
+(`escro_api_user` / `app_8cd02f34...`) bekor qilingan. Yangi onboarding
+POST orqali fresh credentials olindi va serverga yozildi:
 
-- Bevosita curl bilan ham (sandbox va production'da) bir xil javob keladi
-- Basic Auth qabul qilinmoqda (aks holda `invalid_client` kelar edi)
-- RFC 6749 bo'yicha `invalid_grant` resource owner credentials yoki
-  account holati bilan bog'liq
+- `consumer_key` = `app_4fc55e21c55c5aabc828a547`
+- `username` = `escro_api`
+- `merchant_id` = `30227824-2e0f-4e4b-a55c-5f99513e4ba5`
+- (`consumer_secret` va `password` `.credentials/PAYLOV-CREDENTIALS-2026-05-08.json` da, gitignore'da)
 
-**Sabab**: 2-bo'limdagi merchant configuration to'liq yakunlanmagan, Paylov
-xodimlari hisobni "active" holatiga o'tkazmagan.
+Server-side test: `POST /merchant/oauth2/token/` → `HTTP 200`, access_token va refresh_token kelgan.
 
-**Yechim**: Paylov support'ga 2-bo'limdagi ma'lumotlarni jo'nating va
-aktivlashtirishni so'rang. Aktivlashtirilgandan keyin bizning kod
-hech qanday o'zgarishsiz ishlaydi.
+Amaliyatdagi farqlar docs'dan:
+- `refresh_expires_in` Paylov javobida **2592000s (30 kun)** — hujjatda 7 kun
+  deyilgan. Kod 30 kunni qabul qiladi (ko'proq xavfsiz).
+
+**Production'ga o'tish hali bajarilmagan** — yangi production onboarding
+tokenni Paylov support'dan alohida so'rashingiz kerak (sandbox va prod
+tokenlar alohida).
 
 ---
 

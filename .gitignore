@@ -46,6 +46,7 @@ lerna-debug.log*
 PAYLOV-CREDENTIALS-*.json
 PAYLOV-CREDENTIALS.json
 PAYLOV-CREDENTIALS.txt
+.credentials/
 
 # temp directory
 .temp
