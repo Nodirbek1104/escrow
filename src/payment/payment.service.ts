@@ -16,6 +16,7 @@ import {
   TransactionStatus,
   TransactionType,
 } from './entities/transaction.entity';
+import { EscrowContract } from '../escrocontracts/entities/escrocontract.entity';
 import { handlePaymentError } from './utils/payment-error.handler';
 import { ConfigService } from '@nestjs/config';
 
@@ -53,6 +54,8 @@ export class PaymentService {
     private readonly cardRepository: Repository<Card>,
     @InjectRepository(PaymentTransaction)
     private readonly txRepository: Repository<PaymentTransaction>,
+    @InjectRepository(EscrowContract)
+    private readonly contractRepo: Repository<EscrowContract>,
     private readonly configService: ConfigService,
     @InjectRedis() private readonly redis: Redis,
   ) {
@@ -959,10 +962,32 @@ export class PaymentService {
 
   // ─── ADMIN / RECONCILIATION ─────────────────────────────────────────────────
 
-  async getTransactionsByContract(contractId: number) {
+  async getTransactionsByContract(
+    contractId: number,
+    user?: { userId?: number; phoneNumber?: string; role?: string },
+  ) {
+    if (user) {
+      const isAdmin = user.role === 'admin' || user.role === 'super_admin';
+      if (!isAdmin) {
+        const contract = await this.contractRepo.findOne({
+          where: { id: contractId },
+        });
+        if (!contract) {
+          throw new BadRequestException('Shartnoma topilmadi');
+        }
+        const phoneDigits = (s?: string) => String(s ?? '').replace(/\D/g, '');
+        const owns =
+          contract.creatorId === user.userId ||
+          contract.executorId === user.userId ||
+          phoneDigits(contract.executorPhoneNumber) === phoneDigits(user.phoneNumber);
+        if (!owns) {
+          throw new ForbiddenException('Bu shartnoma sizga tegishli emas');
+        }
+      }
+    }
     return this.txRepository.find({
       where: { contractId },
-      order: { createdAt: 'DESC' },
+      order: { createdAt: 'ASC' },
     });
   }
 }

@@ -4,11 +4,12 @@ import { PaymentController } from './payment.controller';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Card } from './entities/payment.entity';
 import { PaymentTransaction } from './entities/transaction.entity';
+import { EscrowContract } from '../escrocontracts/entities/escrocontract.entity';
 import { ConfigModule } from '@nestjs/config';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Card, PaymentTransaction]),
+    TypeOrmModule.forFeature([Card, PaymentTransaction, EscrowContract]),
     ConfigModule,
   ],
   controllers: [PaymentController],

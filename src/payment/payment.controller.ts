@@ -133,10 +133,13 @@ export class PaymentController {
     return this.paymentService.getTransactionStatus(transactionId);
   }
 
-  @UseGuards(JwtAuthGuard, AdminGuard)
+  @UseGuards(JwtAuthGuard)
   @Get('contracts/:contractId/transactions')
-  async contractTransactions(@Param('contractId', ParseIntPipe) contractId: number) {
-    return this.paymentService.getTransactionsByContract(contractId);
+  async contractTransactions(
+    @Req() req: any,
+    @Param('contractId', ParseIntPipe) contractId: number,
+  ) {
+    return this.paymentService.getTransactionsByContract(contractId, req.user);
   }
 
   // ─── PAYLOV WEBHOOK (ochiq endpoint) ─────────────────────────────────────────
