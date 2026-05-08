@@ -132,7 +132,8 @@ export class EscrocontractsService {
           throw new BadRequestException('Shartnomani qabul qilish uchun pul tushadigan kartangizni tanlang!');
         }
         // Karta ijrochiga tegishli ekanligini tekshiramiz (PaymentService ichida)
-        const myCards = await this.paymentService.getMyCards(user.userId);
+        const myCardsResp = await this.paymentService.getMyCards(user.userId);
+        const myCards = myCardsResp?.result?.cards ?? [];
         const ownsCard = myCards.some((c: any) => c.cardId === data.cardId);
         if (!ownsCard) {
           throw new ForbiddenException('Tanlangan karta sizga tegishli emas');
