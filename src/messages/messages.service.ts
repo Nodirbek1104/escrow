@@ -33,16 +33,54 @@ export class MessagesService {
       content,
       senderId,
       fileUrl,
+      type: 'user',
     });
     return this.messageRepository.save(message);
   }
 
-  async findByContract(contractId: number) {
-    return this.messageRepository.find({
+  /** Persist a system note in a contract chat (status change, etc.) */
+  async createSystem(
+    contractId: number,
+    content: string,
+    payload?: Record<string, any>,
+  ) {
+    const message = this.messageRepository.create({
+      contractId,
+      content,
+      senderId: 0,
+      type: 'system',
+      systemPayload: payload ?? null,
+    });
+    return this.messageRepository.save(message);
+  }
+
+  async findByContract(contractId: number, userId?: number) {
+    const messages = await this.messageRepository.find({
       where: { contractId },
       order: { createdAt: 'ASC' },
       relations: ['sender'],
     });
+
+    // Annotate each message with readByOther for the ✓ / ✓✓ ticks UI.
+    // For 2-party contracts (creator + executor), "other party's lastReadAt"
+    // suffices; we read every party's pointer except the requester's.
+    const otherReads = await this.chatReadRepository.find({
+      where: { contractId },
+    });
+    const othersExcludingMe = otherReads.filter((r) => r.userId !== userId);
+    const otherLastReadAt = othersExcludingMe.length
+      ? othersExcludingMe.reduce(
+          (acc, r) => (r.lastReadAt > acc ? r.lastReadAt : acc),
+          new Date(0),
+        )
+      : null;
+
+    return messages.map((m) => ({
+      ...m,
+      readByOther: otherLastReadAt
+        ? new Date(m.createdAt) <= otherLastReadAt
+        : false,
+    }));
   }
 
   /** Per-user inbox: every contract the user participates in, with the

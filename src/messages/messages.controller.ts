@@ -29,8 +29,11 @@ export class MessagesController {
   }
 
   @Get('contract/:id')
-  async getByContract(@Param('id', ParseIntPipe) id: number) {
-    return this.messagesService.findByContract(id);
+  async getByContract(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
+    return this.messagesService.findByContract(id, req.user?.userId);
   }
 
   /** Mark all messages in this contract as read for the current user. */

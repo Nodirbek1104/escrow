@@ -17,6 +17,7 @@ import Redis from 'ioredis';
 import { PaymentService } from '../payment/payment.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { MessagesGateway } from '../messages/messages.gateway';
+import { MessagesService } from '../messages/messages.service';
 import {
   computeCommission,
   getCommissionPercent,
@@ -40,16 +41,57 @@ export class EscrocontractsService {
     private readonly paymentService: PaymentService,
     private readonly notificationsService: NotificationsService,
     private readonly messagesGateway: MessagesGateway,
+    private readonly messagesService: MessagesService,
     @InjectRedis() private readonly redis: Redis,
   ) {}
 
-  private emitContractUpdated(contract: { id: number; status: string }) {
+  /** System message text for the given new status; null = don't post one. */
+  private systemMessageFor(status: string): string | null {
+    switch (status) {
+      case EscrowStatus.PENDING:
+        return 'Shartnoma yaratildi. Ijrochi tasdiqlashini kuting.';
+      case EscrowStatus.ACCEPTED:
+        return 'Ijrochi shartnomani qabul qildi.';
+      case EscrowStatus.PAYMENT_HELD:
+        return "Xaridor mablag'ni muzlatdi. Ish kafolati ostida.";
+      case EscrowStatus.ACTIVE:
+        return 'Ish jarayoni boshlandi.';
+      case EscrowStatus.COMPLETED:
+        return "Shartnoma yakunlandi. Mablag' ijrochiga o'tkazildi.";
+      case EscrowStatus.CANCELLED:
+        return "Shartnoma bekor qilindi. Mablag' xaridorga qaytarildi.";
+      case EscrowStatus.DISPUTED:
+        return "Nizo ochildi. Adminlar holatni ko'rib chiqishadi.";
+      case EscrowStatus.REJECTED:
+        return 'Ijrochi shartnomani rad etdi.';
+      case EscrowStatus.REVISION:
+        return 'Shartnomani qayta ko\'rib chiqish so\'raldi.';
+      default:
+        return null;
+    }
+  }
+
+  private async emitContractUpdated(contract: { id: number; status: string }) {
     try {
       this.messagesGateway.emitToContract(contract.id, 'contractUpdated', {
         id: contract.id,
         status: contract.status,
         at: new Date().toISOString(),
       });
+
+      // Persist + push a system bubble describing the change.
+      const text = this.systemMessageFor(contract.status);
+      if (text) {
+        const sys = await this.messagesService.createSystem(
+          contract.id,
+          text,
+          { kind: 'status_change', to: contract.status },
+        );
+        this.messagesGateway.emitToContract(contract.id, 'newMessage', {
+          ...sys,
+          sender: { id: 0, fullName: 'System' },
+        });
+      }
     } catch (e) {
       this.logger.warn(`emitContractUpdated failed: ${(e as Error).message}`);
     }
@@ -79,6 +121,9 @@ export class EscrocontractsService {
         "contract_created",
         saved.id.toString()
       );
+
+      // Genesis system message in the contract chat
+      await this.emitContractUpdated(saved);
 
       return { ...saved, inviteToken: token, inviteLink };
     } catch (error) {
