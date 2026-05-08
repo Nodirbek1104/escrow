@@ -485,13 +485,19 @@ export class PaymentService {
 
   async getMyCards(userId: number) {
     try {
-      return await this.cardRepository.find({
+      const cards = await this.cardRepository.find({
         where: { userId },
         order: { createdAt: 'DESC' },
       });
+      // Frontend Paylov javob shakli ({result: {cards}, error}) ni kutadi —
+      // shu sababli lokal DB javobini ham xuddi shunday o'rab qaytaramiz.
+      return { result: { cards }, error: null };
     } catch (error) {
       this.logger.error(`getMyCards: ${error}`);
-      return [];
+      return {
+        result: { cards: [] },
+        error: { code: 'internal_error', message: (error as Error).message },
+      };
     }
   }
 
