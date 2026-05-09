@@ -9,6 +9,7 @@ import { AuditLogModule } from '../audit-log/audit-log.module';
 import { PaymentModule } from '../payment/payment.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { MessagesModule } from '../messages/messages.module';
+import { SettingsModule } from '../settings/settings.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { MessagesModule } from '../messages/messages.module';
     PaymentModule,
     NotificationsModule,
     MessagesModule,
+    SettingsModule,
   ],
   controllers: [EscrocontractsController],
   providers: [EscrocontractsService],

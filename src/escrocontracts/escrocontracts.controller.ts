@@ -19,7 +19,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { EscrocontractsService } from './escrocontracts.service';
 import { CreateEscrowContractDto } from './dto/create-escrocontract.dto';
 import { EscrowStatus } from './entities/escrocontract.entity';
-import { getCommissionPercent } from './commission';
+import { SettingsService } from '../settings/settings.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
@@ -29,7 +29,10 @@ import { AdminGuard } from '../auth/guards/admin.guard';
 @Controller('escrow-contracts')
 @UseInterceptors(AuditInterceptor)
 export class EscrocontractsController {
-  constructor(private readonly escrowService: EscrocontractsService) {}
+  constructor(
+    private readonly escrowService: EscrocontractsService,
+    private readonly settings: SettingsService,
+  ) {}
 
   // 1. CREATE
   @UseGuards(JwtAuthGuard)
@@ -63,7 +66,7 @@ export class EscrocontractsController {
   // Public: live platform commission percent (used by wizard preview).
   @Get('commission-rate')
   getCommissionRate() {
-    return { percent: getCommissionPercent() };
+    return { percent: this.settings.getCommissionPercent() };
   }
 
   // 3. INVITE RESOLVE

@@ -18,6 +18,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { TelegramGuard } from './auth/guards/telegram.guard';
 import { MessagesModule } from './messages/messages.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { SettingsModule } from './settings/settings.module';
 
 dotenv.config();
 
@@ -60,6 +61,7 @@ dotenv.config();
     PaymentModule,
     MessagesModule,
     NotificationsModule,
+    SettingsModule,
   ],
   controllers: [AppController],
   providers: [

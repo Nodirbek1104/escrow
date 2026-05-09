@@ -22,11 +22,8 @@ import { PaymentService } from '../payment/payment.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { MessagesGateway } from '../messages/messages.gateway';
 import { MessagesService } from '../messages/messages.service';
-import {
-  computeCommission,
-  getCommissionPercent,
-  totalCharge,
-} from './commission';
+import { SettingsService } from '../settings/settings.service';
+import { computeCommission, totalCharge } from './commission';
 import { buildCsv } from '../common/csv';
 import { error } from 'console';
 
@@ -47,6 +44,7 @@ export class EscrocontractsService {
     private readonly notificationsService: NotificationsService,
     private readonly messagesGateway: MessagesGateway,
     private readonly messagesService: MessagesService,
+    private readonly settings: SettingsService,
     @InjectRedis() private readonly redis: Redis,
   ) {}
 
@@ -142,7 +140,10 @@ export class EscrocontractsService {
   // ─── 1. CREATE (IJROCHI TOMONIDAN) ──────────────────────────────────────────
   async create(dto: CreateEscrowContractDto, user: any, filePath?: string) {
     try {
-      const commissionAmount = computeCommission(Number(dto.amount));
+      const commissionAmount = computeCommission(
+        Number(dto.amount),
+        this.settings.getCommissionPercent(),
+      );
       const role = dto.creatorRole ?? CreatorRole.BUYER;
 
       // Executor-created (Offer) flow: creator pre-selects the payout card
@@ -409,7 +410,7 @@ export class EscrocontractsService {
   private withCommissionMeta(contract: EscrowContract): any {
     return {
       ...contract,
-      commissionPercent: getCommissionPercent(),
+      commissionPercent: this.settings.getCommissionPercent(),
       totalAmount: totalCharge(contract.amount, contract.commissionAmount),
     };
   }
