@@ -434,7 +434,7 @@ export class EscrocontractsService {
 
 
 
-  async findOne(id: number, user: any): Promise<EscrowContract> {
+async findOne(id: number, user: any): Promise<EscrowContract> {
   try {
     const contract = await this.contractRepo.findOne({
       where: { id },
@@ -446,26 +446,17 @@ export class EscrocontractsService {
     const isCreator = contract.creatorId === user.userId;
     const isExecutor = !!contract.executorId && contract.executorId === user.userId;
 
-    // Link orqali kelgan invitee (hali to'lov qilmagan, lekin telefoni mos)
-    let isInvitee = false;
-    if (!contract.executorId && contract.executorPhoneNumber && user.phoneNumber) {
-      isInvitee =
-        this.normalizePhone(contract.executorPhoneNumber) ===
-        this.normalizePhone(user.phoneNumber);
-    }
-
-    if (!isAdmin && !isCreator && !isExecutor && !isInvitee) {
+    if (!isAdmin && !isCreator && !isExecutor) {
       throw new NotFoundException('Shartnoma topilmadi');
     }
 
     return this.withCommissionMeta(contract);
   } catch (error) {
     if (error instanceof NotFoundException) throw error;
-    this.logger.error(`findOne error for contract ${id}: ${error}`);
+    this.logger.error(`findOne error: ${error}`);
     throw new BadRequestException('Ma\'lumotni olishda xato');
   }
 }
-
 // Class ichiga shu helper'ni qo'shing:
 private normalizePhone(phone: string | null | undefined): string {
   if (!phone) return '';
