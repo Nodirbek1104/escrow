@@ -453,8 +453,7 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
       this.logger.error(`UpdateStatus Error: ${error}`);
       throw error;
     }
-  }
-async findOne(id: number, user: any): Promise<EscrowContract> {
+  }async findOne(id: number, user: any): Promise<EscrowContract> {
   try {
     const contract = await this.contractRepo.findOne({
       where: { id },
@@ -469,22 +468,10 @@ async findOne(id: number, user: any): Promise<EscrowContract> {
     // Hali qo'shilmagan invitee — telefon orqali tekshirish
     let isPendingInvitee = false;
     if (!contract.executorId && contract.executorPhoneNumber && user.phoneNumber) {
-      isPendingInvitee =
-        this.normalizePhone(contract.executorPhoneNumber) ===
-        this.normalizePhone(user.phoneNumber);
+      const contractPhone = this.normalizePhone(contract.executorPhoneNumber);
+      const userPhone = this.normalizePhone(user.phoneNumber);
+      isPendingInvitee = !!contractPhone && contractPhone === userPhone;
     }
-
-    // 🔥 DEBUG (vaqtinchalik — ishlagach o'chirib tashlang)
-    console.log('🔥 findOne check:', {
-      userId: user?.userId,
-      userPhone: user?.phoneNumber,
-      contractCreatorId: contract.creatorId,
-      contractExecutorId: contract.executorId,
-      contractExecutorPhone: contract.executorPhoneNumber,
-      normalizedUserPhone: this.normalizePhone(user?.phoneNumber),
-      normalizedContractPhone: this.normalizePhone(contract.executorPhoneNumber),
-      isAdmin, isCreator, isExecutor, isPendingInvitee,
-    });
 
     if (!isAdmin && !isCreator && !isExecutor && !isPendingInvitee) {
       throw new NotFoundException('Shartnoma topilmadi');
@@ -493,8 +480,59 @@ async findOne(id: number, user: any): Promise<EscrowContract> {
     return this.withCommissionMeta(contract);
   } catch (error) {
     if (error instanceof NotFoundException) throw error;
-    this.logger.error(`findOne error: ${error}`);
+    this.logger.error(`findOne error for contract ${id}: ${error}`);
     throw new BadRequestException('Ma\'lumotni olishda xato');
+  }
+}
+
+async getContractByToken(token: string, user: any) {
+  try {
+    const raw = await this.redis.get(`contract_invite:${token}`);
+    if (!raw) throw new BadRequestException("Link muddati o'tgan");
+
+    let payload: { contractId?: number; phone?: string };
+    try {
+      payload = JSON.parse(raw);
+    } catch {
+      this.logger.error(`Invite payload buzilgan: ${raw}`);
+      throw new BadRequestException("Link ma'lumotlari buzilgan");
+    }
+
+    if (!payload?.contractId) {
+      throw new BadRequestException("Link ma'lumotlari to'liq emas");
+    }
+
+    if (!user?.phoneNumber) {
+      this.logger.error(`User'da phoneNumber yo'q: ${JSON.stringify(user)}`);
+      throw new ForbiddenException(
+        "Profilingizda telefon raqami ko'rsatilmagan (JWT xatosi)",
+      );
+    }
+
+    if (!payload.phone) {
+      throw new BadRequestException("Link ma'lumotlari buzilgan");
+    }
+
+    // findOne bilan bir xil normalize logikasi
+    const payloadPhone = this.normalizePhone(payload.phone);
+    const userPhone = this.normalizePhone(user.phoneNumber);
+
+    if (!payloadPhone || !userPhone || payloadPhone !== userPhone) {
+      // IDOR-safe: boshqa user uchun "yaroqsiz" deb ko'rsatamiz
+      throw new NotFoundException("Taklif yaroqsiz yoki muddati o'tgan");
+    }
+
+    return this.findOne(payload.contractId, user);
+  } catch (error) {
+    if (
+      error instanceof BadRequestException ||
+      error instanceof NotFoundException ||
+      error instanceof ForbiddenException
+    ) {
+      throw error;
+    }
+    this.logger.error(`getContractByToken Error: ${error}`);
+    throw new BadRequestException("Linkni tekshirishda xato");
   }
 }
 
@@ -692,36 +730,35 @@ private normalizePhone(phone: string | null | undefined): string {
     }
   }
 
-async getContractByToken(token: string, user: any) {
-  const raw = await this.redis.get(`contract_invite:${token}`);
-  if (!raw) throw new BadRequestException("Link muddati o'tgan");
+// async getContractByToken(token: string, user: any) {
+//   const raw = await this.redis.get(`contract_invite:${token}`);
+//   if (!raw) throw new BadRequestException("Link muddati o'tgan");
 
-  const payload = JSON.parse(raw);
+//   const payload = JSON.parse(raw);
 
-  // 1. O'zgaruvchilarni xavfsiz olish (String() va ?. ishlatish)
-  // Bu yerda payload.phone yoki user.phoneNumber bo'lmasa, replace ishga tushmaydi
-  const payloadPhone = payload?.phone ? String(payload.phone).replace(/\D/g, '') : null;
-  const userPhone = user?.phoneNumber ? String(user.phoneNumber).replace(/\D/g, '') : null;
+//   // 1. O'zgaruvchilarni xavfsiz olish (String() va ?. ishlatish)
+//   // Bu yerda payload.phone yoki user.phoneNumber bo'lmasa, replace ishga tushmaydi
+//  const payloadPhone = this.normalizePhone(payload.phone);
+// const userPhone = this.normalizePhone(user.phoneNumber);
+//   // 2. Agar foydalanuvchida raqam bo'lmasa, aniq xato beramiz
+//   if (!userPhone) {
+//     this.logger.error(`Foydalanuvchi ob'ektida phoneNumber topilmadi: ${JSON.stringify(user)}`);
+//     throw new ForbiddenException("Profilingizda telefon raqami ko'rsatilmagan (JWT xatosi)");
+//   }
 
-  // 2. Agar foydalanuvchida raqam bo'lmasa, aniq xato beramiz
-  if (!userPhone) {
-    this.logger.error(`Foydalanuvchi ob'ektida phoneNumber topilmadi: ${JSON.stringify(user)}`);
-    throw new ForbiddenException("Profilingizda telefon raqami ko'rsatilmagan (JWT xatosi)");
-  }
+//   // 3. Agar Redis dagi payloadda raqam bo'lmasa
+//   if (!payloadPhone) {
+//     throw new BadRequestException("Link ma'lumotlari buzilgan yoki telefon raqami topilmadi");
+//   }
 
-  // 3. Agar Redis dagi payloadda raqam bo'lmasa
-  if (!payloadPhone) {
-    throw new BadRequestException("Link ma'lumotlari buzilgan yoki telefon raqami topilmadi");
-  }
+//   if (payloadPhone !== userPhone) {
+//     // IDOR-safe: don't confirm the link is valid for someone else; pretend
+//     // it's invalid to the wrong user too.
+//     throw new NotFoundException('Taklif yaroqsiz yoki muddati o‘tgan');
+//   }
 
-  if (payloadPhone !== userPhone) {
-    // IDOR-safe: don't confirm the link is valid for someone else; pretend
-    // it's invalid to the wrong user too.
-    throw new NotFoundException('Taklif yaroqsiz yoki muddati o‘tgan');
-  }
-
-  return this.findOne(payload.contractId, user);
-}
+//   return this.findOne(payload.contractId, user);
+// }
 
   async findAllByUser(user: any) {
     return this.contractRepo.find({
