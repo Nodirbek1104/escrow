@@ -432,28 +432,45 @@ export class EscrocontractsService {
     }
   }
 
-  // ─── 4. FIND ONE (XATOLIKLAR BILAN) ────────────────────────────────────────
+
+
   async findOne(id: number, user: any): Promise<EscrowContract> {
-    try {
-      const contract = await this.contractRepo.findOne({
-        where: { id },
-        relations: ['creator'],
-      });
-      if (!contract) throw new NotFoundException('Shartnoma topilmadi');
+  try {
+    const contract = await this.contractRepo.findOne({
+      where: { id },
+      relations: ['creator'],
+    });
+    if (!contract) throw new NotFoundException('Shartnoma topilmadi');
 
-      // Admin bo'lsa hamma shartnomani ko'ra oladi
-      const isAdmin = user.role === 'admin' || user.role === 'super_admin';
-      if (!isAdmin && contract.creatorId !== user.userId && contract.executorPhoneNumber !== user.phoneNumber) {
-         // IDOR-safe: opaque 404 for non-participants instead of admitting the row exists.
-         throw new NotFoundException('Shartnoma topilmadi');
-      }
+    const isAdmin = user.role === 'admin' || user.role === 'super_admin';
+    const isCreator = contract.creatorId === user.userId;
+    const isExecutor = !!contract.executorId && contract.executorId === user.userId;
 
-      return this.withCommissionMeta(contract);
-    } catch (error) {
-      if (error instanceof NotFoundException) throw error;
-      throw new BadRequestException('Maʼlumotni olishda xato');
+    // Link orqali kelgan invitee (hali to'lov qilmagan, lekin telefoni mos)
+    let isInvitee = false;
+    if (!contract.executorId && contract.executorPhoneNumber && user.phoneNumber) {
+      isInvitee =
+        this.normalizePhone(contract.executorPhoneNumber) ===
+        this.normalizePhone(user.phoneNumber);
     }
+
+    if (!isAdmin && !isCreator && !isExecutor && !isInvitee) {
+      throw new NotFoundException('Shartnoma topilmadi');
+    }
+
+    return this.withCommissionMeta(contract);
+  } catch (error) {
+    if (error instanceof NotFoundException) throw error;
+    this.logger.error(`findOne error for contract ${id}: ${error}`);
+    throw new BadRequestException('Ma\'lumotni olishda xato');
   }
+}
+
+// Class ichiga shu helper'ni qo'shing:
+private normalizePhone(phone: string | null | undefined): string {
+  if (!phone) return '';
+  return phone.replace(/\D/g, '').slice(-9); // Oxirgi 9 ta raqam
+}
 
   /** Attach commissionPercent + totalAmount to the response (computed). */
   private withCommissionMeta(contract: EscrowContract): any {
