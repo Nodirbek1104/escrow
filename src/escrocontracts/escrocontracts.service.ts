@@ -432,8 +432,7 @@ export class EscrocontractsService {
     }
   }
 
-
-
+  // ─── 4. FIND ONE (XATOLIKLAR BILAN) ────────────────────────────────────────
 async findOne(id: number, user: any): Promise<EscrowContract> {
   try {
     const contract = await this.contractRepo.findOne({
@@ -445,22 +444,28 @@ async findOne(id: number, user: any): Promise<EscrowContract> {
     const isAdmin = user.role === 'admin' || user.role === 'super_admin';
     const isCreator = contract.creatorId === user.userId;
     const isExecutor = !!contract.executorId && contract.executorId === user.userId;
+    
+    let isPendingInvitee = false;
+    if (!contract.executorId && contract.executorPhoneNumber && user.phoneNumber) {
+      isPendingInvitee =
+        this.normalizePhone(contract.executorPhoneNumber) ===
+        this.normalizePhone(user.phoneNumber);
+    }
 
-    if (!isAdmin && !isCreator && !isExecutor) {
+    if (!isAdmin && !isCreator && !isExecutor && !isPendingInvitee) {
       throw new NotFoundException('Shartnoma topilmadi');
     }
 
     return this.withCommissionMeta(contract);
   } catch (error) {
     if (error instanceof NotFoundException) throw error;
-    this.logger.error(`findOne error: ${error}`);
     throw new BadRequestException('Ma\'lumotni olishda xato');
   }
 }
-// Class ichiga shu helper'ni qo'shing:
+
 private normalizePhone(phone: string | null | undefined): string {
   if (!phone) return '';
-  return phone.replace(/\D/g, '').slice(-9); // Oxirgi 9 ta raqam
+  return phone.replace(/\D/g, '').slice(-9);
 }
 
   /** Attach commissionPercent + totalAmount to the response (computed). */
