@@ -12,6 +12,7 @@ import {
   HttpCode,
   HttpStatus,
   UnauthorizedException,
+  BadRequestException,
   Logger,
   Headers,
   ParseIntPipe,
@@ -143,6 +144,54 @@ export class PaymentController {
     @Param('contractId', ParseIntPipe) contractId: number,
   ) {
     return this.paymentService.getTransactionsByContract(contractId, req.user);
+  }
+
+  /** ADMIN: pending or failed payouts that may need manual intervention. */
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  @Get('admin/payouts/queue')
+  async payoutQueue() {
+    return this.paymentService.getPayoutQueue();
+  }
+
+  /** ADMIN: full financial reconciliation across every contract. */
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  @Get('admin/reconciliation')
+  async reconciliation() {
+    return this.paymentService.runReconciliation();
+  }
+
+  /** ADMIN: financial audit for a single contract. */
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  @Get('admin/reconciliation/:contractId')
+  async reconciliationOne(
+    @Param('contractId', ParseIntPipe) contractId: number,
+  ) {
+    return this.paymentService.auditOneContract(contractId);
+  }
+
+  /** ADMIN: approve a parked payout (sends it to Paylov). */
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  @Post('admin/payouts/:txId/approve')
+  async approvePayout(@Req() req: any, @Param('txId') txId: string) {
+    return this.paymentService.approvePayout(txId, req.user.userId);
+  }
+
+  /** ADMIN: deny a parked payout (records the rejection, marks contract DISPUTED). */
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  @Post('admin/payouts/:txId/deny')
+  async denyPayout(
+    @Req() req: any,
+    @Param('txId') txId: string,
+    @Body() body: { reason?: string },
+  ) {
+    if (!body?.reason || !body.reason.trim()) {
+      throw new BadRequestException('Rad etish sababi kerak');
+    }
+    return this.paymentService.denyPayout(
+      txId,
+      req.user.userId,
+      body.reason,
+    );
   }
 
   /** ADMIN: payment transactions CSV export (optional from/to/type/status). */

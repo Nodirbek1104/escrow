@@ -43,6 +43,24 @@ export class User {
   @Column({ type: "bigint", nullable: true, unique: true })
   telegramId?: string | null;
 
+  // KYC verification flow. 'unverified' = never submitted, 'pending' =
+  // submitted and awaiting admin review, 'approved' = admin verified,
+  // 'rejected' = admin rejected (rejectionReason explains why).
+  @Column({ type: "varchar", default: "unverified" })
+  kycStatus!: "unverified" | "pending" | "approved" | "rejected";
+
+  @Column({ type: "varchar", nullable: true })
+  kycRejectionReason?: string | null;
+
+  @Column({ type: "timestamp", nullable: true })
+  kycSubmittedAt?: Date | null;
+
+  @Column({ type: "timestamp", nullable: true })
+  kycReviewedAt?: Date | null;
+
+  @Column({ type: "integer", nullable: true })
+  kycReviewedBy?: number | null;
+
   // --- RELATIONLAR ---
   
   @OneToMany(() => EscrowContract, (contract) => contract.creator)

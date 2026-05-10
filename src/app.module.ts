@@ -19,6 +19,7 @@ import { TelegramGuard } from './auth/guards/telegram.guard';
 import { MessagesModule } from './messages/messages.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { SettingsModule } from './settings/settings.module';
+import { KycModule } from './kyc/kyc.module';
 
 dotenv.config();
 
@@ -33,13 +34,14 @@ dotenv.config();
         : join(__dirname, '..', 'uploads'),
       exclude: ['/api*'],
     }),
-    // Named throttler buckets. Routes can opt into a stricter one via
-    // @Throttle({ <name>: { limit, ttl } }). The 'default' bucket applies
-    // when a route doesn't specify anything.
+    // Single default throttler bucket. Per-route stricter limits are
+    // applied with `@Throttle({ default: { limit, ttl } })`. We
+    // intentionally avoid multiple named trackers here — when several
+    // are configured globally, every request is checked against ALL of
+    // them (so a 3/min "otp" tracker would 429 the 4th POST anywhere on
+    // the API, not just /send-otp).
     ThrottlerModule.forRoot([
-      { name: 'default', ttl: 60_000, limit: 60 },
-      { name: 'auth', ttl: 60_000, limit: 10 },
-      { name: 'otp', ttl: 60_000, limit: 3 },
+      { name: 'default', ttl: 60_000, limit: 120 },
     ]),
     RedisModule.forRoot({
       type: 'single',
@@ -62,6 +64,7 @@ dotenv.config();
     MessagesModule,
     NotificationsModule,
     SettingsModule,
+    KycModule,
   ],
   controllers: [AppController],
   providers: [

@@ -117,11 +117,27 @@ export class EscrocontractsController {
     return this.escrowService.findAllAdmin();
   }
 
+  // 6b. PERSONAL ANALYTICS (web-app dashboard)
+  @UseGuards(JwtAuthGuard)
+  @Get('me/analytics')
+  async myAnalytics(@Req() req: any, @Query('days') daysRaw?: string) {
+    const days = daysRaw ? Number(daysRaw) : 30;
+    return this.escrowService.getMyAnalytics(req.user, days);
+  }
+
   // 9b. ADMIN: FINANCE SUMMARY (held liability, commission, status counts)
   @Get('admin/finance-summary')
   @UseGuards(JwtAuthGuard, AdminGuard)
   async financeSummary() {
     return this.escrowService.getFinanceSummary();
+  }
+
+  // 9b2. ADMIN: REVENUE ANALYTICS (daily series, last N days)
+  @Get('admin/analytics')
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  async analytics(@Query('days') daysRaw?: string) {
+    const days = daysRaw ? Number(daysRaw) : 30;
+    return this.escrowService.getRevenueAnalytics(days);
   }
 
   // 9c. ADMIN: contracts CSV export (optional from / to / status filters)

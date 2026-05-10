@@ -28,6 +28,30 @@ const DEFAULT_SETTINGS: Array<{
     value: '28',
     description: 'Qisqa muddatli kontrakt uchun standart muddat (kun)',
   },
+  {
+    key: 'sla_pending_grace_days',
+    value: '14',
+    description:
+      'Pending/accepted shartnomalar shu muddatda to\'lanmasa avto-bekor qilinadi (kun)',
+  },
+  {
+    key: 'sla_overdue_warn_days',
+    value: '3',
+    description:
+      'Payment_held/active shartnomalar muddatdan shuncha kun o\'tsa ogohlantirish yuboriladi (kun)',
+  },
+  {
+    key: 'payout_auto_approve_threshold',
+    value: '5000000',
+    description:
+      'Avto-tasdiqlanadigan payout chegarasi (so\'m). Bundan yuqori summa admin tasdiqlovini kutadi.',
+  },
+  {
+    key: 'payout_require_kyc',
+    value: 'false',
+    description:
+      'Payout ijrochining KYC tasdiqlangan bo\'lishini talab qiladimi (true/false)',
+  },
 ];
 
 @Injectable()

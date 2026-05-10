@@ -6,11 +6,16 @@ import { Card } from './entities/payment.entity';
 import { PaymentTransaction } from './entities/transaction.entity';
 import { EscrowContract } from '../escrocontracts/entities/escrocontract.entity';
 import { ConfigModule } from '@nestjs/config';
+import { SettingsModule } from '../settings/settings.module';
+import { NotificationsModule } from '../notifications/notifications.module';
+import { User } from '../user/entities/user.entity';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Card, PaymentTransaction, EscrowContract]),
+    TypeOrmModule.forFeature([Card, PaymentTransaction, EscrowContract, User]),
     ConfigModule,
+    SettingsModule,
+    NotificationsModule,
   ],
   controllers: [PaymentController],
   providers: [PaymentService],

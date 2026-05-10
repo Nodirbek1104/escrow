@@ -12,21 +12,21 @@ export class UserController {
   // 1. SMS yuborish
   @Post('send-otp')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ otp: { limit: 3, ttl: 60_000 } })
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   async sendOtp(@Body() sendOtpDto: SendOtpDto) {
     return this.userService.sendOtp(sendOtpDto);
   }
 
   @Post('verify-otp')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ auth: { limit: 10, ttl: 60_000 } })
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   async verifyOtp(@Body() verifyOtpDto: VerifyOtpDto) {
     return this.userService.verifyOtp(verifyOtpDto);
   }
 
   // 2. Ro'yxatdan o'tishni yakunlash (SMS kod + Parol)
   @Post('register')
-  @Throttle({ auth: { limit: 5, ttl: 60_000 } })
+  @Throttle({ default: { limit: 15, ttl: 60_000 } })
   async register(
     @Body() completeDto: CompleteRegisterDto,
     @Headers('x-tg-data') tgData?: string,
@@ -38,10 +38,14 @@ export class UserController {
     return result;
   }
 
-  // 3. Login (Telefon + Parol)
+  // 3. Login (Telefon + Parol).
+  // 30/min IP throttle is just a coarse net — the real bruteforce defence
+  // is in user.service.ts (Redis-backed `login_fail:<phone>` counter, 5
+  // failures = 15 min lockout). Keeping the IP throttle low caused 429s
+  // for users on shared NATs (cafe Wi-Fi, mobile carrier).
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ auth: { limit: 10, ttl: 60_000 } })
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   async login(
     @Body() loginDto: LoginDto,
     @Headers('x-tg-data') tgData?: string,
@@ -57,7 +61,7 @@ export class UserController {
   // Returning users skip phone+OTP entirely once their telegramId is linked.
   @Post('telegram')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ auth: { limit: 20, ttl: 60_000 } })
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   async loginTelegram(@Body() body: { initData: string }) {
     return this.userService.loginByTelegram(body?.initData);
   }
@@ -83,14 +87,14 @@ async updateProfile(@Request() req, @Body() dto: UpdateUserDto) {
 }
 @Post('forgot-password')
 @HttpCode(HttpStatus.OK)
-@Throttle({ otp: { limit: 3, ttl: 60_000 } })
+@Throttle({ default: { limit: 5, ttl: 60_000 } })
 async forgotPassword(@Body() dto: ForgotPasswordDto) {
   return this.userService.forgotPassword(dto);
 }
 
 @Post('reset-password')
 @HttpCode(HttpStatus.OK)
-@Throttle({ auth: { limit: 5, ttl: 60_000 } })
+@Throttle({ default: { limit: 15, ttl: 60_000 } })
 async resetPassword(@Body() dto: ResetPasswordDto) {
   return this.userService.resetPassword(dto);
 }

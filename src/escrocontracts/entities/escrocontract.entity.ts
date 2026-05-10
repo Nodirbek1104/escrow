@@ -73,6 +73,14 @@ export class EscrowContract {
   /** Pinned message id for the contract chat (Telegram-style sticky). */
   @Column({ type: 'integer', nullable: true })
   pinnedMessageId?: number | null;
+
+  /**
+   * Timestamp of the last "deadline overdue" SLA notification we sent for
+   * this contract. Used to make the SLA cron one-shot per contract so
+   * participants aren't pinged every hour. Null = never warned.
+   */
+  @Column({ type: 'timestamp', nullable: true })
+  slaWarnedAt?: Date | null;
   // --------------------------------------------
 
   @Column({ nullable: true })

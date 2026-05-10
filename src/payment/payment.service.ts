@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   Injectable,
   Logger,
+  NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -18,8 +19,12 @@ import {
 } from './entities/transaction.entity';
 import { EscrowContract } from '../escrocontracts/entities/escrocontract.entity';
 import { handlePaymentError } from './utils/payment-error.handler';
+import { auditContract } from './utils/contract-auditor';
 import { buildCsv } from '../common/csv';
 import { ConfigService } from '@nestjs/config';
+import { SettingsService } from '../settings/settings.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { User, UserRole } from '../user/entities/user.entity';
 
 interface CachedToken {
   accessToken: string;
@@ -57,8 +62,12 @@ export class PaymentService {
     private readonly txRepository: Repository<PaymentTransaction>,
     @InjectRepository(EscrowContract)
     private readonly contractRepo: Repository<EscrowContract>,
+    @InjectRepository(User)
+    private readonly userRepo: Repository<User>,
     private readonly configService: ConfigService,
     @InjectRedis() private readonly redis: Redis,
+    private readonly settings: SettingsService,
+    private readonly notifications: NotificationsService,
   ) {
     this.baseUrl = this.configService.get<string>('PAYLOV_BASE_URL');
     this.consumerKey = this.configService.get<string>('PAYLOV_CONSUMER_KEY');
@@ -291,7 +300,9 @@ export class PaymentService {
   ): Promise<Card> {
     const card = await this.cardRepository.findOne({ where: { cardId, userId } });
     if (!card) {
-      throw new ForbiddenException('Karta sizga tegishli emas yoki topilmadi');
+      // IDOR-safe: identical 404 whether the card doesn't exist or belongs
+      // to another user.
+      throw new NotFoundException('Karta topilmadi');
     }
     if (!card.isActive) {
       throw new BadRequestException('Karta faol emas');
@@ -718,6 +729,66 @@ export class PaymentService {
           error: null,
         };
       }
+      // Already awaiting / denied — don't push it through Paylov again.
+      if (tx.status === TransactionStatus.AWAITING_APPROVAL) {
+        return {
+          result: null,
+          error: {
+            code: 'awaiting_approval',
+            message: 'Payout admin tasdiqlovini kutmoqda',
+          },
+        };
+      }
+      if (tx.status === TransactionStatus.DENIED) {
+        return {
+          result: null,
+          error: {
+            code: 'denied',
+            message: 'Payout admin tomonidan rad etilgan',
+          },
+        };
+      }
+
+      // ─── Payout protection: high-amount or KYC-gated payouts go to a
+      //  manual approval queue instead of being sent straight to Paylov. ──
+      const thresholdSum = this.settings.getNumber(
+        'payout_auto_approve_threshold',
+        5_000_000,
+      );
+      const requireKyc =
+        this.settings.getString('payout_require_kyc', 'false').toLowerCase() ===
+        'true';
+
+      let needsApproval = amountSum > thresholdSum;
+      let approvalReason = needsApproval
+        ? `Summa avto-tasdiqlash chegarasidan ko'p (>${thresholdSum} so'm)`
+        : '';
+      if (!needsApproval && requireKyc) {
+        const recipient = await this.userRepo.findOne({
+          where: { id: card.userId },
+        });
+        if (recipient?.kycStatus !== 'approved') {
+          needsApproval = true;
+          approvalReason = "Qabul qiluvchining KYC tasdiqlanmagan";
+        }
+      }
+      if (needsApproval) {
+        tx.status = TransactionStatus.AWAITING_APPROVAL;
+        tx.approvalNote = approvalReason;
+        await this.txRepository.save(tx);
+        await this.notifyAdminsOfPendingPayout(tx, approvalReason);
+        this.logger.warn(
+          `Payout ${tx.id} (contract ${contractId}, ${amountSum} so'm) parked for approval: ${approvalReason}`,
+        );
+        return {
+          result: null,
+          error: {
+            code: 'awaiting_approval',
+            message: 'Payout admin tasdiqlovini kutmoqda',
+            reason: approvalReason,
+          },
+        };
+      }
 
       const { data } = await this.client.post(
         '/merchant/a2c/performTransaction',
@@ -745,6 +816,140 @@ export class PaymentService {
     } catch (error) {
       this.logger.error(`Paylov payoutToCard: ${error}`);
       return handlePaymentError(error);
+    }
+  }
+
+  /**
+   * Approve a parked payout: sends it to Paylov and saves the result. Used
+   * by the admin Payout Queue. Idempotent — calling it twice on an
+   * already-paid tx returns the existing result.
+   */
+  async approvePayout(txId: string, adminId: number) {
+    const tx = await this.txRepository.findOne({ where: { id: txId } });
+    if (!tx) throw new BadRequestException('Tranzaksiya topilmadi');
+    if (tx.type !== TransactionType.PAYOUT) {
+      throw new BadRequestException('Faqat payout tranzaksiyalari');
+    }
+    if (tx.status === TransactionStatus.PAID_OUT && tx.paylovTransactionId) {
+      return {
+        result: { transactionId: tx.paylovTransactionId, alreadyPaid: true },
+        error: null,
+      };
+    }
+    if (tx.status !== TransactionStatus.AWAITING_APPROVAL) {
+      throw new BadRequestException(
+        `Tasdiqlash mumkin emas: holat=${tx.status}`,
+      );
+    }
+    if (!tx.cardId) {
+      throw new BadRequestException('Karta ID topilmadi');
+    }
+
+    try {
+      const { data } = await this.client.post(
+        '/merchant/a2c/performTransaction',
+        {
+          serviceId: this.merchantId,
+          userId: String(tx.userId),
+          cardId: tx.cardId,
+          amountInTiyin: Number(tx.amount),
+          externalId: tx.extId,
+        },
+      );
+      tx.rawResponse = data;
+      const paylovId = data?.result?.transactionId ?? data?.transactionId;
+      if (paylovId) {
+        tx.paylovTransactionId = String(paylovId);
+        tx.status = TransactionStatus.PAID_OUT;
+      } else {
+        tx.status = TransactionStatus.FAILED;
+        tx.lastError = data?.error ?? data;
+      }
+      tx.approvedBy = adminId;
+      tx.approvedAt = new Date();
+      await this.txRepository.save(tx);
+      return data;
+    } catch (error) {
+      this.logger.error(`Approve payout ${txId} failed: ${error}`);
+      tx.status = TransactionStatus.FAILED;
+      tx.approvedBy = adminId;
+      tx.approvedAt = new Date();
+      await this.txRepository.save(tx);
+      return handlePaymentError(error);
+    }
+  }
+
+  /**
+   * Deny a parked payout. Doesn't call Paylov; just records the rejection
+   * and (if the contract is still in flight) flips it to DISPUTED so an
+   * admin/operator can pick up the next steps with the participants.
+   */
+  async denyPayout(txId: string, adminId: number, reason: string) {
+    const tx = await this.txRepository.findOne({ where: { id: txId } });
+    if (!tx) throw new BadRequestException('Tranzaksiya topilmadi');
+    if (tx.type !== TransactionType.PAYOUT) {
+      throw new BadRequestException('Faqat payout tranzaksiyalari');
+    }
+    if (tx.status !== TransactionStatus.AWAITING_APPROVAL) {
+      throw new BadRequestException(
+        `Rad etish mumkin emas: holat=${tx.status}`,
+      );
+    }
+    if (!reason || !reason.trim()) {
+      throw new BadRequestException('Rad etish sababi kerak');
+    }
+    tx.status = TransactionStatus.DENIED;
+    tx.approvedBy = adminId;
+    tx.approvedAt = new Date();
+    tx.approvalNote = reason.trim();
+    await this.txRepository.save(tx);
+
+    // Surface the denial to the participants by parking the contract in
+    // DISPUTED so the next operator action can resolve it.
+    if (tx.contractId) {
+      const contract = await this.contractRepo.findOne({
+        where: { id: tx.contractId },
+      });
+      if (contract && contract.status !== 'completed' && contract.status !== 'cancelled' && contract.status !== 'disputed') {
+        contract.status = 'disputed' as any;
+        contract.rejectionReason =
+          contract.rejectionReason ||
+          `Payout rad etildi: ${reason.trim()}`;
+        await this.contractRepo.save(contract);
+      }
+    }
+    return { ok: true, status: tx.status };
+  }
+
+  /** Notify all admins that a new payout is awaiting approval. */
+  private async notifyAdminsOfPendingPayout(
+    tx: PaymentTransaction,
+    reason: string,
+  ): Promise<void> {
+    try {
+      const admins = await this.userRepo.find({
+        where: [{ role: UserRole.ADMIN }, { role: UserRole.SUPER_ADMIN }],
+        select: ['id'],
+      });
+      const sumAmount = Number(tx.amount) / 100;
+      const formatted = new Intl.NumberFormat('uz-UZ').format(
+        Math.round(sumAmount),
+      );
+      for (const a of admins) {
+        await this.notifications
+          .create(
+            a.id,
+            'Payout tasdiqlovini kutmoqda',
+            `Shartnoma #${tx.contractId ?? '?'} — ${formatted} so'm. Sabab: ${reason}`,
+            'payout_awaits_approval',
+            tx.contractId ? String(tx.contractId) : undefined,
+          )
+          .catch(() => undefined);
+      }
+    } catch (e) {
+      this.logger.warn(
+        `Failed to notify admins about pending payout ${tx.id}: ${(e as Error).message}`,
+      );
     }
   }
 
@@ -1014,7 +1219,8 @@ export class PaymentService {
           contract.executorId === user.userId ||
           phoneDigits(contract.executorPhoneNumber) === phoneDigits(user.phoneNumber);
         if (!owns) {
-          throw new ForbiddenException('Bu shartnoma sizga tegishli emas');
+          // IDOR-safe: opaque 404 to a non-participant.
+          throw new NotFoundException('Shartnoma topilmadi');
         }
       }
     }
@@ -1022,6 +1228,132 @@ export class PaymentService {
       where: { contractId },
       order: { createdAt: 'ASC' },
     });
+  }
+
+  /**
+   * Per-contract financial audit. Walks the contract's payment_transactions
+   * and verifies the invariants in `auditContract` (held >= charged + dismissed,
+   * paidOut <= charged, paidOut == amount, held == amount + commission).
+   * Used for both the admin Reconciliation page and as a sanity check
+   * before settlement.
+   */
+  async auditOneContract(contractId: number) {
+    const contract = await this.contractRepo.findOne({ where: { id: contractId } });
+    if (!contract) {
+      throw new BadRequestException('Shartnoma topilmadi');
+    }
+    const transactions = await this.txRepository.find({
+      where: { contractId },
+      order: { createdAt: 'ASC' },
+    });
+    return auditContract({
+      contractId: contract.id,
+      expectedAmountSum: Number(contract.amount ?? 0),
+      expectedCommissionSum: Number(contract.commissionAmount ?? 0),
+      transactions,
+    });
+  }
+
+  /**
+   * Full reconciliation sweep across every contract. One pass over the
+   * contracts table + one pass over the transactions table; results are
+   * grouped in JS. Returns flagged contracts (those failing any
+   * invariant) plus aggregate totals so the admin can see the size of
+   * the discrepancy at a glance.
+   *
+   * For tens of thousands of contracts we'd paginate; current scale is
+   * comfortably small.
+   */
+  async runReconciliation() {
+    const [contracts, allTxs] = await Promise.all([
+      this.contractRepo.find({
+        select: ['id', 'title', 'status', 'amount', 'commissionAmount'],
+      }),
+      this.txRepository.find(),
+    ]);
+    const txsByContract = new Map<number, PaymentTransaction[]>();
+    for (const tx of allTxs) {
+      if (tx.contractId == null) continue;
+      const arr = txsByContract.get(tx.contractId) ?? [];
+      arr.push(tx);
+      txsByContract.set(tx.contractId, arr);
+    }
+    const results = contracts.map((c) => {
+      const audit = auditContract({
+        contractId: c.id,
+        expectedAmountSum: Number(c.amount ?? 0),
+        expectedCommissionSum: Number(c.commissionAmount ?? 0),
+        transactions: txsByContract.get(c.id) ?? [],
+      });
+      return {
+        ...audit,
+        title: c.title,
+        status: c.status,
+        amount: Number(c.amount ?? 0),
+        commissionAmount: Number(c.commissionAmount ?? 0),
+      };
+    });
+    const flagged = results.filter((r) => !r.ok);
+    const totalsTiyin = results.reduce(
+      (acc, r) => {
+        acc.held += r.sums.held;
+        acc.charged += r.sums.charged;
+        acc.dismissed += r.sums.dismissed;
+        acc.paidOut += r.sums.paidOut;
+        return acc;
+      },
+      { held: 0, charged: 0, dismissed: 0, paidOut: 0 },
+    );
+    return {
+      totalContracts: contracts.length,
+      flaggedCount: flagged.length,
+      okCount: contracts.length - flagged.length,
+      totalsTiyin,
+      flagged,
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Admin payout queue: payout-type transactions in non-final states
+   * (`pending`, `failed`). Returns each transaction joined with its parent
+   * contract so the admin can decide whether to retry or escalate.
+   */
+  async getPayoutQueue() {
+    const txs = await this.txRepository
+      .createQueryBuilder('t')
+      .where('t.type = :type', { type: 'payout' })
+      .andWhere('t.status IN (:...statuses)', {
+        statuses: ['pending', 'failed', 'awaiting_approval'],
+      })
+      .orderBy('t.createdAt', 'ASC')
+      .getMany();
+    if (txs.length === 0) return [];
+
+    const contractIds = Array.from(
+      new Set(txs.map((t) => t.contractId).filter((x) => x != null)),
+    ) as number[];
+    const contracts = contractIds.length
+      ? await this.contractRepo.find({
+          where: contractIds.map((id) => ({ id })),
+        })
+      : [];
+    const byId = new Map(contracts.map((c) => [c.id, c]));
+    return txs.map((t) => ({
+      ...t,
+      contract: t.contractId
+        ? byId.get(t.contractId)
+          ? {
+              id: byId.get(t.contractId)!.id,
+              title: byId.get(t.contractId)!.title,
+              amount: byId.get(t.contractId)!.amount,
+              status: byId.get(t.contractId)!.status,
+              receiverCardId: byId.get(t.contractId)!.receiverCardId,
+              transactionId: byId.get(t.contractId)!.transactionId,
+            }
+          : null
+        : null,
+    }));
   }
 
   /** Build a CSV of payment transactions in the given window. Admin-only. */

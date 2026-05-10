@@ -14,11 +14,12 @@ import {
   EscrowStatus,
 } from './entities/escrocontract.entity';
 import { CreateEscrowContractDto } from './dto/create-escrocontract.dto';
-import { User } from '../user/entities/user.entity';
+import { User, UserRole } from '../user/entities/user.entity';
 import { SmsService } from '../user/send.sms.service'; 
 import { InjectRedis } from '@nestjs-modules/ioredis';
 import Redis from 'ioredis';
 import { PaymentService } from '../payment/payment.service';
+import { mapPaylovError } from '../payment/utils/paylov-error-map';
 import { NotificationsService } from '../notifications/notifications.service';
 import { MessagesGateway } from '../messages/messages.gateway';
 import { MessagesService } from '../messages/messages.service';
@@ -108,6 +109,32 @@ export class EscrocontractsService {
         return 'Shartnomani qayta ko\'rib chiqish so\'raldi.';
       default:
         return null;
+    }
+  }
+
+  /** Page every admin/super_admin when a dispute is opened so arbitration
+   *  can pick it up. Best-effort — we swallow per-recipient errors. */
+  private async notifyAdminsOfDispute(
+    contract: EscrowContract,
+    reason?: string,
+  ): Promise<void> {
+    const admins = await this.userRepo.find({
+      where: [{ role: UserRole.ADMIN }, { role: UserRole.SUPER_ADMIN }],
+      select: ['id'],
+    });
+    const tail = reason?.trim()
+      ? ` Sabab: ${reason.trim().slice(0, 200)}`
+      : '';
+    for (const a of admins) {
+      await this.notificationsService
+        .create(
+          a.id,
+          'Yangi nizo',
+          `#ESC-${contract.id} "${contract.title}" — arbitraj kerak.${tail}`,
+          'dispute_admin',
+          String(contract.id),
+        )
+        .catch(() => undefined);
     }
   }
 
@@ -279,9 +306,22 @@ export class EscrocontractsService {
           }
           contract.status = EscrowStatus.PAYMENT_HELD;
         } else {
-          const errMsg = holdResult?.error?.message || 'Kartada mablag\'ni muzlatishda xatolik';
-          this.logger.error(`Hold failed for contract ${contract.id}: ${JSON.stringify(holdResult?.error)}`);
-          throw new BadRequestException(errMsg);
+          const mapped = mapPaylovError({
+            code: holdResult?.error?.code,
+            message: holdResult?.error?.message,
+          });
+          this.logger.error(
+            `Hold failed for contract ${contract.id} [${mapped.category}]: ${JSON.stringify(holdResult?.error)}`,
+          );
+          // Throw a structured BadRequest so the FE can render a specific
+          // error block (e.g. "balans yetarli emas") rather than a toast.
+          throw new BadRequestException({
+            statusCode: 400,
+            message: mapped.title,
+            errorCategory: mapped.category,
+            hint: mapped.hint,
+            paylov: mapped.raw,
+          });
         }
       } else if (status === EscrowStatus.ACCEPTED && this.isExecutorActing(contract, user)) {
         // Executor accepting + setting receiver card (buyer-created flow).
@@ -374,6 +414,15 @@ export class EscrocontractsService {
         );
       }
 
+      // Auto-escalation: when a contract enters DISPUTED, page every admin
+      // so somebody can pick up the arbitration. Done after participants
+      // are notified so the admin push isn't blocked by their delivery.
+      if (savedContract.status === EscrowStatus.DISPUTED) {
+        await this.notifyAdminsOfDispute(savedContract, data?.reason).catch(
+          (e) => this.logger.warn(`Admin escalation failed: ${e?.message}`),
+        );
+      }
+
       this.emitContractUpdated(savedContract);
 
       return savedContract;
@@ -395,8 +444,8 @@ export class EscrocontractsService {
       // Admin bo'lsa hamma shartnomani ko'ra oladi
       const isAdmin = user.role === 'admin' || user.role === 'super_admin';
       if (!isAdmin && contract.creatorId !== user.userId && contract.executorPhoneNumber !== user.phoneNumber) {
-         // Agar shartnoma tarafi bo'lmasa, ko'rish taqiqlanadi
-         throw new ForbiddenException('Sizda ushbu shartnomani ko‘rish huquqi yo‘q');
+         // IDOR-safe: opaque 404 for non-participants instead of admitting the row exists.
+         throw new NotFoundException('Shartnoma topilmadi');
       }
 
       return this.withCommissionMeta(contract);
@@ -618,7 +667,9 @@ async getContractByToken(token: string, user: any) {
   }
 
   if (payloadPhone !== userPhone) {
-    throw new ForbiddenException('Bu link boshqa telefon raqamiga tegishli');
+    // IDOR-safe: don't confirm the link is valid for someone else; pretend
+    // it's invalid to the wrong user too.
+    throw new NotFoundException('Taklif yaroqsiz yoki muddati o‘tgan');
   }
 
   return this.findOne(payload.contractId, user);
@@ -739,6 +790,199 @@ async getContractByToken(token: string, user: any) {
       totalContracts: all.length,
       statusCounts,
       generatedAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Per-user analytics for the web-app dashboard. Counts contracts where
+   * the user is buyer (money out) or executor (money in) over the last
+   * `days` days, broken into daily buckets.
+   *
+   * `spent` is sourced from contracts the user paid into; `earned` is
+   * what they received as the executor on completed contracts. `held`
+   * is the live escrow balance (not in the time-series, just totals) for
+   * contracts in payment_held / active / disputed.
+   */
+  async getMyAnalytics(user: any, days = 30) {
+    const span = Math.max(1, Math.min(365, Number(days) || 30));
+    const since = new Date();
+    since.setUTCHours(0, 0, 0, 0);
+    since.setUTCDate(since.getUTCDate() - (span - 1));
+
+    const phoneDigits = String(user.phoneNumber ?? '').replace(/\D/g, '');
+
+    // Pull every contract the user could be involved in (creator, executor
+    // by id, or invitee by phone). Then we filter in JS using the role
+    // helpers so this stays in sync with how the rest of the service
+    // determines buyer vs executor.
+    const candidates = await this.contractRepo
+      .createQueryBuilder('c')
+      .where('c."creatorId" = :uid', { uid: user.userId })
+      .orWhere('c."executorId" = :uid', { uid: user.userId })
+      .orWhere(
+        `regexp_replace(c."executorPhoneNumber", '[^0-9]', '', 'g') = :phone`,
+        { phone: phoneDigits },
+      )
+      .getMany();
+
+    type Bucket = { date: string; spent: number; earned: number };
+    const buckets = new Map<string, Bucket>();
+    for (let i = 0; i < span; i++) {
+      const d = new Date(since);
+      d.setUTCDate(since.getUTCDate() + i);
+      const key = d.toISOString().slice(0, 10);
+      buckets.set(key, { date: key, spent: 0, earned: 0 });
+    }
+
+    let totalSpent = 0;
+    let totalEarned = 0;
+    let totalHeld = 0;
+    let totalCommissionPaid = 0;
+    let activeCount = 0;
+    let completedCount = 0;
+    let cancelledCount = 0;
+
+    const heldStatuses = new Set([
+      EscrowStatus.PAYMENT_HELD,
+      EscrowStatus.ACTIVE,
+      EscrowStatus.DISPUTED,
+    ]);
+
+    for (const c of candidates) {
+      const isBuyer = this.isBuyerActing(c, user);
+      const isExecutor = this.isExecutorActing(c, user);
+      if (!isBuyer && !isExecutor) continue;
+
+      const amt = Number(c.amount ?? 0);
+      const com = Number(c.commissionAmount ?? 0);
+      const createdKey = new Date(c.createdAt)
+        .toISOString()
+        .slice(0, 10);
+
+      // Live held funds (only the buyer's money is at risk)
+      if (heldStatuses.has(c.status)) {
+        if (isBuyer) totalHeld += amt + com;
+        activeCount++;
+      } else if (c.status === EscrowStatus.COMPLETED) {
+        completedCount++;
+        if (isBuyer) {
+          totalSpent += amt + com;
+          totalCommissionPaid += com;
+          const b = buckets.get(createdKey);
+          if (b) b.spent += amt + com;
+        }
+        if (isExecutor) {
+          totalEarned += amt;
+          const b = buckets.get(createdKey);
+          if (b) b.earned += amt;
+        }
+      } else if (c.status === EscrowStatus.CANCELLED) {
+        cancelledCount++;
+      }
+    }
+
+    return {
+      days: span,
+      from: since.toISOString().slice(0, 10),
+      to: new Date().toISOString().slice(0, 10),
+      series: Array.from(buckets.values()),
+      totals: {
+        spent: totalSpent,
+        earned: totalEarned,
+        held: totalHeld,
+        commissionPaid: totalCommissionPaid,
+        active: activeCount,
+        completed: completedCount,
+        cancelled: cancelledCount,
+      },
+    };
+  }
+
+  /**
+   * Daily time-series for the admin Revenue Analytics dashboard. Buckets
+   * the last `days` days by calendar date (UTC) and returns counts +
+   * monetary sums per day. Empty days are filled with zeros so the chart
+   * has a continuous x-axis.
+   */
+  async getRevenueAnalytics(days = 30) {
+    const span = Math.max(1, Math.min(365, Number(days) || 30));
+    const since = new Date();
+    since.setUTCHours(0, 0, 0, 0);
+    since.setUTCDate(since.getUTCDate() - (span - 1));
+
+    const rows = await this.contractRepo
+      .createQueryBuilder('c')
+      .select('c.id', 'id')
+      .addSelect('c.status', 'status')
+      .addSelect('c.amount', 'amount')
+      .addSelect('c."commissionAmount"', 'commissionAmount')
+      .addSelect('c."createdAt"', 'createdAt')
+      .where('c."createdAt" >= :since', { since })
+      .getRawMany();
+
+    type Bucket = {
+      date: string;
+      newContracts: number;
+      completed: number;
+      cancelled: number;
+      volume: number; // sum of amount on contracts created that day
+      commission: number; // sum of commissionAmount on completed contracts that day
+    };
+
+    const buckets = new Map<string, Bucket>();
+    for (let i = 0; i < span; i++) {
+      const d = new Date(since);
+      d.setUTCDate(since.getUTCDate() + i);
+      const key = d.toISOString().slice(0, 10);
+      buckets.set(key, {
+        date: key,
+        newContracts: 0,
+        completed: 0,
+        cancelled: 0,
+        volume: 0,
+        commission: 0,
+      });
+    }
+
+    let totalVolume = 0;
+    let totalCommission = 0;
+    let totalNew = 0;
+    let totalCompleted = 0;
+    let totalCancelled = 0;
+
+    for (const r of rows) {
+      const date = new Date(r.createdAt as Date).toISOString().slice(0, 10);
+      const bucket = buckets.get(date);
+      if (!bucket) continue;
+      const amt = Number(r.amount ?? 0);
+      const com = Number(r.commissionAmount ?? 0);
+      bucket.newContracts += 1;
+      bucket.volume += amt;
+      totalNew += 1;
+      totalVolume += amt;
+      if (r.status === EscrowStatus.COMPLETED) {
+        bucket.completed += 1;
+        bucket.commission += com;
+        totalCompleted += 1;
+        totalCommission += com;
+      } else if (r.status === EscrowStatus.CANCELLED) {
+        bucket.cancelled += 1;
+        totalCancelled += 1;
+      }
+    }
+
+    return {
+      days: span,
+      from: since.toISOString().slice(0, 10),
+      to: new Date().toISOString().slice(0, 10),
+      series: Array.from(buckets.values()),
+      totals: {
+        newContracts: totalNew,
+        completed: totalCompleted,
+        cancelled: totalCancelled,
+        volume: totalVolume,
+        commission: totalCommission,
+      },
     };
   }
   // ─── UPDATE METODI ─────────────────────────────────────────────────────────

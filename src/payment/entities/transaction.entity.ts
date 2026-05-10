@@ -19,6 +19,10 @@ export enum TransactionStatus {
   HELD = 'held',
   CHARGED = 'charged',
   DISMISSED = 'dismissed',
+  /** Payout is held back awaiting admin approval (high amount / KYC etc.). */
+  AWAITING_APPROVAL = 'awaiting_approval',
+  /** Admin denied a pending payout — won't be sent to Paylov. */
+  DENIED = 'denied',
   PAID_OUT = 'paid_out',
   FAILED = 'failed',
 }
@@ -70,6 +74,17 @@ export class PaymentTransaction {
   /** Last error returned by Paylov, if any. */
   @Column({ type: 'jsonb', nullable: true })
   lastError?: any;
+
+  /** Admin user id who approved/denied this payout. Null until reviewed. */
+  @Column({ type: 'integer', nullable: true })
+  approvedBy?: number | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  approvedAt?: Date | null;
+
+  /** Reason if denied (or any audit note from admin on approval). */
+  @Column({ type: 'text', nullable: true })
+  approvalNote?: string | null;
 
   @CreateDateColumn()
   createdAt!: Date;

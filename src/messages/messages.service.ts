@@ -315,7 +315,9 @@ export class MessagesService {
       contract.executorId === user.userId ||
       (phoneDigits && phoneDigits === inviteeDigits);
     if (!isCreator && !isExecutor) {
-      throw new ForbiddenException("Siz bu shartnomaning ishtirokchisi emassiz");
+      // IDOR-safe: opaque 404 — listing chat for a non-participant must
+      // not confirm whether the contract id exists.
+      throw new NotFoundException('Shartnoma topilmadi');
     }
   }
 
