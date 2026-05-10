@@ -431,8 +431,6 @@ export class EscrocontractsService {
       throw error;
     }
   }
-
-  // ─── 4. FIND ONE (XATOLIKLAR BILAN) ────────────────────────────────────────
 async findOne(id: number, user: any): Promise<EscrowContract> {
   try {
     const contract = await this.contractRepo.findOne({
@@ -444,13 +442,26 @@ async findOne(id: number, user: any): Promise<EscrowContract> {
     const isAdmin = user.role === 'admin' || user.role === 'super_admin';
     const isCreator = contract.creatorId === user.userId;
     const isExecutor = !!contract.executorId && contract.executorId === user.userId;
-    
+
+    // Hali qo'shilmagan invitee — telefon orqali tekshirish
     let isPendingInvitee = false;
     if (!contract.executorId && contract.executorPhoneNumber && user.phoneNumber) {
       isPendingInvitee =
         this.normalizePhone(contract.executorPhoneNumber) ===
         this.normalizePhone(user.phoneNumber);
     }
+
+    // 🔥 DEBUG (vaqtinchalik — ishlagach o'chirib tashlang)
+    console.log('🔥 findOne check:', {
+      userId: user?.userId,
+      userPhone: user?.phoneNumber,
+      contractCreatorId: contract.creatorId,
+      contractExecutorId: contract.executorId,
+      contractExecutorPhone: contract.executorPhoneNumber,
+      normalizedUserPhone: this.normalizePhone(user?.phoneNumber),
+      normalizedContractPhone: this.normalizePhone(contract.executorPhoneNumber),
+      isAdmin, isCreator, isExecutor, isPendingInvitee,
+    });
 
     if (!isAdmin && !isCreator && !isExecutor && !isPendingInvitee) {
       throw new NotFoundException('Shartnoma topilmadi');
@@ -459,15 +470,16 @@ async findOne(id: number, user: any): Promise<EscrowContract> {
     return this.withCommissionMeta(contract);
   } catch (error) {
     if (error instanceof NotFoundException) throw error;
+    this.logger.error(`findOne error: ${error}`);
     throw new BadRequestException('Ma\'lumotni olishda xato');
   }
 }
 
+// Helper — class ichiga qo'shing
 private normalizePhone(phone: string | null | undefined): string {
   if (!phone) return '';
   return phone.replace(/\D/g, '').slice(-9);
 }
-
   /** Attach commissionPercent + totalAmount to the response (computed). */
   private withCommissionMeta(contract: EscrowContract): any {
     return {
