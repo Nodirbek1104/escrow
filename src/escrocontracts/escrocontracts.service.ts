@@ -66,25 +66,48 @@ export class EscrocontractsService {
       : (c.executorId ?? null);
   }
 
-  /** True when `user` is the buyer of this contract (creator or invitee). */
-  private isBuyerActing(c: EscrowContract, user: any): boolean {
-    if (c.creatorRole === CreatorRole.BUYER) return user.userId === c.creatorId;
-    // executor-created: buyer is the invitee
-    if (c.executorId && user.userId === c.executorId) return true;
-    const phone = String(user.phoneNumber ?? '').replace(/\D/g, '');
-    const invitee = String(c.executorPhoneNumber ?? '').replace(/\D/g, '');
-    return !!(phone && phone === invitee);
+/** True when `user` is the buyer of this contract (creator or invitee). */
+private isBuyerActing(c: EscrowContract, user: any): boolean {
+  // Buyer-created: creator = buyer
+  if (c.creatorRole === CreatorRole.BUYER) {
+    return user.userId === c.creatorId;
   }
+  
+  // Executor-created: invitee = buyer
+  // 1. Allaqachon qo'shilgan (executorId mavjud)
+  if (c.executorId) {
+    return user.userId === c.executorId;
+  }
+  
+  // 2. Hali qo'shilmagan, telefon orqali aniqlash
+  return this.isInviteeByPhone(c, user);
+}
 
-  /** True when `user` is the executor of this contract. */
-  private isExecutorActing(c: EscrowContract, user: any): boolean {
-    if (c.creatorRole === CreatorRole.EXECUTOR) return user.userId === c.creatorId;
-    // buyer-created: executor is the invitee
-    if (c.executorId && user.userId === c.executorId) return true;
-    const phone = String(user.phoneNumber ?? '').replace(/\D/g, '');
-    const invitee = String(c.executorPhoneNumber ?? '').replace(/\D/g, '');
-    return !!(phone && phone === invitee);
+/** True when `user` is the executor of this contract. */
+private isExecutorActing(c: EscrowContract, user: any): boolean {
+  // Executor-created: creator = executor
+  if (c.creatorRole === CreatorRole.EXECUTOR) {
+    return user.userId === c.creatorId;
   }
+  
+  // Buyer-created: invitee = executor
+  // 1. Allaqachon qo'shilgan
+  if (c.executorId) {
+    return user.userId === c.executorId;
+  }
+  
+  // 2. Hali qo'shilmagan, telefon orqali aniqlash
+  return this.isInviteeByPhone(c, user);
+}
+
+/** Helper: check if user matches the invitee phone */
+private isInviteeByPhone(c: EscrowContract, user: any): boolean {
+  if (!c.executorPhoneNumber || !user.phoneNumber) return false;
+  return (
+    this.normalizePhone(c.executorPhoneNumber) ===
+    this.normalizePhone(user.phoneNumber)
+  );
+}
 
   /** System message text for the given new status; null = don't post one. */
   private systemMessageFor(status: string): string | null {
