@@ -120,6 +120,9 @@ export class EscrowContract {
   @ManyToOne(() => User, (user) => user.id)
   @JoinColumn({ name: 'creatorId' })
   creator!: User;
+  @ManyToOne(() => User, { nullable: true })
+  @JoinColumn({ name: 'executorId' })
+  executor?: User;
 
   @Column()
   creatorId!: number; // Creatorning IDsi (oson kirish uchun)

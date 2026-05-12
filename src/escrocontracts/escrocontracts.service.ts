@@ -453,11 +453,12 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
       this.logger.error(`UpdateStatus Error: ${error}`);
       throw error;
     }
-  }async findOne(id: number, user: any): Promise<EscrowContract> {
+  }
+  async findOne(id: number, user: any): Promise<EscrowContract> {
   try {
     const contract = await this.contractRepo.findOne({
       where: { id },
-      relations: ['creator'],
+      relations: ['creator', 'executor'],
     });
     if (!contract) throw new NotFoundException('Shartnoma topilmadi');
 
@@ -766,14 +767,14 @@ private normalizePhone(phone: string | null | undefined): string {
         { creatorId: user.userId },
         { executorPhoneNumber: user.phoneNumber },
       ],
-      relations: ['creator'],
+      relations: ['creator', 'executor'],
       order: { createdAt: 'DESC' },
     });
   }
 
   async findAllAdmin() {
     return this.contractRepo.find({
-      relations: ['creator'],
+      relations: ['creator', 'executor'],
       order: { createdAt: 'DESC' },
     });
   }
