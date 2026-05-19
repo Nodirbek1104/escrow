@@ -21,6 +21,7 @@ import { EscrowContract } from '../escrocontracts/entities/escrocontract.entity'
 import { handlePaymentError } from './utils/payment-error.handler';
 import { auditContract } from './utils/contract-auditor';
 import { buildCsv } from '../common/csv';
+import { sumToTiyin, tiyinToSum, formatSum } from '../common/money.util';
 import { ConfigService } from '@nestjs/config';
 import { SettingsService } from '../settings/settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -280,13 +281,6 @@ export class PaymentService {
 
   // ─── HELPERS ────────────────────────────────────────────────────────────────
 
-  private toTiyin(amountSum: number): number {
-    if (!Number.isFinite(amountSum) || amountSum < 0) {
-      throw new BadRequestException('Noto\'g\'ri summa');
-    }
-    return Math.round(amountSum * 100);
-  }
-
   private buildExternalId(
     contractId: string | number,
     action: 'hold' | 'payout' | 'charge' | 'dismiss',
@@ -538,7 +532,7 @@ export class PaymentService {
     try {
       await this.assertCardOwnedByUser(userId, cardId);
 
-      const amountTiyin = this.toTiyin(amountSum);
+      const amountTiyin = sumToTiyin(amountSum);
       const externalId = this.buildExternalId(contractId, 'hold');
 
       const tx = await this.upsertTx({
@@ -587,7 +581,7 @@ export class PaymentService {
 
   async fulfillEscrow(transactionId: string, amountSum: number) {
     try {
-      const amountTiyin = this.toTiyin(amountSum);
+      const amountTiyin = sumToTiyin(amountSum);
 
       const holdTx = await this.txRepository.findOne({
         where: {
@@ -697,7 +691,7 @@ export class PaymentService {
     contractId: string | number,
   ) {
     try {
-      const amountTiyin = this.toTiyin(amountSum);
+      const amountTiyin = sumToTiyin(amountSum);
       const externalId = this.buildExternalId(contractId, 'payout');
 
       const card = await this.cardRepository.findOne({
@@ -931,10 +925,7 @@ export class PaymentService {
         where: [{ role: UserRole.ADMIN }, { role: UserRole.SUPER_ADMIN }],
         select: ['id'],
       });
-      const sumAmount = Number(tx.amount) / 100;
-      const formatted = new Intl.NumberFormat('uz-UZ').format(
-        Math.round(sumAmount),
-      );
+      const formatted = formatSum(tiyinToSum(tx.amount));
       for (const a of admins) {
         await this.notifications
           .create(

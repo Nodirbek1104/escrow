@@ -3,6 +3,7 @@ import {
   TransactionStatus,
   TransactionType,
 } from '../entities/transaction.entity';
+import { sumToTiyin } from '../../common/money.util';
 
 /**
  * Walks a single contract's payment transactions and surfaces invariants
@@ -45,10 +46,6 @@ const SUCCESS_HOLD = new Set([TransactionStatus.HELD, TransactionStatus.CHARGED]
 const SUCCESS_CHARGE = new Set([TransactionStatus.CHARGED]);
 const SUCCESS_DISMISS = new Set([TransactionStatus.DISMISSED]);
 const SUCCESS_PAYOUT = new Set([TransactionStatus.PAID_OUT]);
-
-function tiyinFromSum(sum: number): number {
-  return Math.round(sum * 100);
-}
 
 export function auditContract(
   input: ContractAuditInput,
@@ -112,10 +109,10 @@ export function auditContract(
   if (
     input.expectedAmountSum !== undefined &&
     paidOut > 0 &&
-    paidOut !== tiyinFromSum(input.expectedAmountSum)
+    paidOut !== sumToTiyin(input.expectedAmountSum)
   ) {
     errors.push(
-      `Hisobot: paidOut tiyin (${paidOut}) != kutilgan amount tiyin (${tiyinFromSum(input.expectedAmountSum)})`,
+      `Hisobot: paidOut tiyin (${paidOut}) != kutilgan amount tiyin (${sumToTiyin(input.expectedAmountSum)})`,
     );
   }
 
@@ -126,8 +123,8 @@ export function auditContract(
     held > 0
   ) {
     const expectedHeld =
-      tiyinFromSum(input.expectedAmountSum) +
-      tiyinFromSum(input.expectedCommissionSum);
+      sumToTiyin(input.expectedAmountSum) +
+      sumToTiyin(input.expectedCommissionSum);
     if (held !== expectedHeld) {
       errors.push(
         `Hisobot: held tiyin (${held}) != amount + commission tiyin (${expectedHeld})`,
