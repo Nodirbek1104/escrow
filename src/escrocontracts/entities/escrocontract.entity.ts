@@ -75,6 +75,18 @@ export class EscrowContract {
   pinnedMessageId?: number | null;
 
   /**
+   * Admin user assigned to handle this contract's dispute. Set when the
+   * contract first enters DISPUTED (round-robin by current dispute load).
+   * Stays set after resolution so we can audit who handled what.
+   */
+  @Column({ type: 'integer', nullable: true })
+  assignedAdminId?: number | null;
+
+  @ManyToOne(() => User, { nullable: true })
+  @JoinColumn({ name: 'assignedAdminId' })
+  assignedAdmin?: User | null;
+
+  /**
    * Timestamp of the last "deadline overdue" SLA notification we sent for
    * this contract. Used to make the SLA cron one-shot per contract so
    * participants aren't pinged every hour. Null = never warned.

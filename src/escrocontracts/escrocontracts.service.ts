@@ -125,7 +125,9 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
       case EscrowStatus.CANCELLED:
         return "Shartnoma bekor qilindi. Mablag' xaridorga qaytarildi.";
       case EscrowStatus.DISPUTED:
-        return "Nizo ochildi. Adminlar holatni ko'rib chiqishadi.";
+        // Suppressed here — postDisputeAdminAssigned() pushes a richer
+        // system message naming the lead admin, so we'd get a duplicate.
+        return null;
       case EscrowStatus.REJECTED:
         return 'Ijrochi shartnomani rad etdi.';
       case EscrowStatus.REVISION:
@@ -135,11 +137,39 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
     }
   }
 
-  /** Page every admin/super_admin when a dispute is opened so arbitration
-   *  can pick it up. Best-effort — we swallow per-recipient errors. */
+  /**
+   * Pick the admin to take lead on a fresh dispute. Round-robin by current
+   * active assignments: admin with the fewest in-flight DISPUTED contracts
+   * wins; ties broken by user id for determinism. Returns null when no
+   * admin is registered.
+   */
+  private async pickAdminForDispute(): Promise<User | null> {
+    const admins = await this.userRepo.find({
+      where: [{ role: UserRole.ADMIN }, { role: UserRole.SUPER_ADMIN }],
+      order: { id: 'ASC' },
+    });
+    if (admins.length === 0) return null;
+    const loads = await Promise.all(
+      admins.map(async (a) => ({
+        admin: a,
+        load: await this.contractRepo.count({
+          where: { assignedAdminId: a.id, status: EscrowStatus.DISPUTED },
+        }),
+      })),
+    );
+    loads.sort((a, b) => a.load - b.load || a.admin.id - b.admin.id);
+    return loads[0]?.admin ?? null;
+  }
+
+  /**
+   * Page admins when a dispute is opened. The `lead` admin (one assigned)
+   * gets a personal "tayinlandi" notification; the rest get the broadcast
+   * `dispute_admin` so anyone with capacity can still jump in. Best-effort.
+   */
   private async notifyAdminsOfDispute(
     contract: EscrowContract,
-    reason?: string,
+    reason: string | undefined,
+    lead: User | null,
   ): Promise<void> {
     const admins = await this.userRepo.find({
       where: [{ role: UserRole.ADMIN }, { role: UserRole.SUPER_ADMIN }],
@@ -149,15 +179,47 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
       ? ` Sabab: ${reason.trim().slice(0, 200)}`
       : '';
     for (const a of admins) {
+      const isLead = lead?.id === a.id;
       await this.notificationsService
         .create(
           a.id,
-          'Yangi nizo',
-          `#ESC-${contract.id} "${contract.title}" — arbitraj kerak.${tail}`,
+          isLead ? 'Sizga nizo tayinlandi' : 'Yangi nizo',
+          isLead
+            ? `#ESC-${contract.id} "${contract.title}" sizga tayinlandi. Arbitraj boshlang.${tail}`
+            : `#ESC-${contract.id} "${contract.title}" — arbitraj kerak.${tail}`,
           'dispute_admin',
           String(contract.id),
         )
         .catch(() => undefined);
+    }
+  }
+
+  /**
+   * Post a system bubble naming the lead admin so participants know who is
+   * looking at their case. Falls back to the generic message if no admin
+   * was assigned (e.g. system has no admin users).
+   */
+  private async postDisputeAdminAssigned(
+    contractId: number,
+    lead: User | null,
+  ): Promise<void> {
+    try {
+      const text = lead?.fullName
+        ? `Nizo ochildi. Admin ${lead.fullName} sizga yordam beradi.`
+        : 'Nizo ochildi. Adminlar holatni ko\'rib chiqishadi.';
+      const sys = await this.messagesService.createSystem(contractId, text, {
+        kind: 'dispute_admin_assigned',
+        adminId: lead?.id ?? null,
+        adminName: lead?.fullName ?? null,
+      });
+      this.messagesGateway.emitToContract(contractId, 'newMessage', {
+        ...sys,
+        sender: { id: 0, fullName: 'System' },
+      });
+    } catch (e) {
+      this.logger.warn(
+        `postDisputeAdminAssigned failed: ${(e as Error).message}`,
+      );
     }
   }
 
@@ -404,10 +466,28 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
           this.logger.error(
             `Payout failed for contract ${contract.id}: ${JSON.stringify(payoutRes?.error)}`,
           );
-          // Shartnomani DISPUTED'ga o'tkazamiz va admin ko'rib chiqsin
+          // Shartnomani DISPUTED'ga o'tkazamiz va admin ko'rib chiqsin.
+          // Same auto-assign + chat-announce flow as a user-opened dispute,
+          // otherwise the failure silently rots in the queue.
           contract.status = EscrowStatus.DISPUTED;
           contract.rejectionReason = `Payout xatosi: ${errMsg}`;
-          await this.contractRepo.save(contract);
+          let payoutDisputeLead: User | null = null;
+          if (!contract.assignedAdminId) {
+            payoutDisputeLead = await this.pickAdminForDispute();
+            if (payoutDisputeLead) {
+              contract.assignedAdminId = payoutDisputeLead.id;
+            }
+          }
+          const failedContract = await this.contractRepo.save(contract);
+          await this.notifyAdminsOfDispute(
+            failedContract,
+            `Payout xatosi: ${errMsg}`,
+            payoutDisputeLead,
+          ).catch((e) =>
+            this.logger.warn(`Admin escalation failed: ${e?.message}`),
+          );
+          await this.postDisputeAdminAssigned(failedContract.id, payoutDisputeLead);
+          this.emitContractUpdated(failedContract);
           throw new BadRequestException(errMsg);
         }
 
@@ -416,13 +496,23 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
 
       if (data?.reason) contract.rejectionReason = data.reason;
 
+      let disputeLead: User | null = null;
       if (status === EscrowStatus.DISPUTED) {
         if (!data?.reason) {
           throw new BadRequestException('Nizo ochish uchun sabab ko‘rsatish shart!');
         }
         contract.status = EscrowStatus.DISPUTED;
+        // Round-robin assign so participants see a named admin and the
+        // load is spread evenly across the team. Only set on first entry
+        // into DISPUTED — re-disputes after admin action keep the same lead.
+        if (!contract.assignedAdminId) {
+          disputeLead = await this.pickAdminForDispute();
+          if (disputeLead) {
+            contract.assignedAdminId = disputeLead.id;
+          }
+        }
       }
-      
+
       const savedContract = await this.contractRepo.save(contract);
 
       // Trigger Notifications
@@ -441,9 +531,16 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
       // so somebody can pick up the arbitration. Done after participants
       // are notified so the admin push isn't blocked by their delivery.
       if (savedContract.status === EscrowStatus.DISPUTED) {
-        await this.notifyAdminsOfDispute(savedContract, data?.reason).catch(
-          (e) => this.logger.warn(`Admin escalation failed: ${e?.message}`),
+        await this.notifyAdminsOfDispute(
+          savedContract,
+          data?.reason,
+          disputeLead,
+        ).catch((e) =>
+          this.logger.warn(`Admin escalation failed: ${e?.message}`),
         );
+        // Drop a chat bubble naming the lead so participants don't sit in
+        // the dark waiting for an unknown admin to appear.
+        await this.postDisputeAdminAssigned(savedContract.id, disputeLead);
       }
 
       this.emitContractUpdated(savedContract);
@@ -458,7 +555,7 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
   try {
     const contract = await this.contractRepo.findOne({
       where: { id },
-      relations: ['creator', 'executor'],
+      relations: ['creator', 'executor', 'assignedAdmin'],
     });
     if (!contract) throw new NotFoundException('Shartnoma topilmadi');
 
@@ -767,14 +864,14 @@ private normalizePhone(phone: string | null | undefined): string {
         { creatorId: user.userId },
         { executorPhoneNumber: user.phoneNumber },
       ],
-      relations: ['creator', 'executor'],
+      relations: ['creator', 'executor', 'assignedAdmin'],
       order: { createdAt: 'DESC' },
     });
   }
 
   async findAllAdmin() {
     return this.contractRepo.find({
-      relations: ['creator', 'executor'],
+      relations: ['creator', 'executor', 'assignedAdmin'],
       order: { createdAt: 'DESC' },
     });
   }
