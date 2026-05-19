@@ -310,7 +310,10 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
       });
 
       const saved = await this.contractRepo.save(contract);
-      const token = await this.sendInviteSms(saved, dto.executorPhoneNumber);
+      const { token, smsSent } = await this.sendInviteSms(
+        saved,
+        dto.executorPhoneNumber,
+      );
       const inviteLink = `${FRONTEND_URL}/invite/${token}`;
 
       // Notify creator (Success)
@@ -325,7 +328,7 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
       // Genesis system message in the contract chat
       await this.emitContractUpdated(saved);
 
-      return { ...saved, inviteToken: token, inviteLink };
+      return { ...saved, inviteToken: token, inviteLink, smsSent };
     } catch (error) {
       this.logger.error(`Create Error: ${error}`);
       throw error;
@@ -811,7 +814,10 @@ private normalizePhone(phone: string | null | undefined): string {
   }
 
   // ─── YORDAMCHI METODLAR ───────────────────────────────────────────────────
-  private async sendInviteSms(contract: EscrowContract, phone: string) {
+  private async sendInviteSms(
+    contract: EscrowContract,
+    phone: string,
+  ): Promise<{ token: string; smsSent: boolean }> {
     const token = uuidv4();
     await this.redis.setex(
       `contract_invite:${token}`,
@@ -831,12 +837,17 @@ private normalizePhone(phone: string | null | undefined): string {
 
     try {
       await this.smsService.send(phone, message);
+      return { token, smsSent: true };
     } catch (error) {
+      // Eskiz template moderation yetilgunicha SMS qaytarib turibdi
+      // (eski "не прошёл модерацию"). FE javobdan linkni o'qiydi va
+      // foydalanuvchiga qo'lda ulashish CTA'sini ko'rsatadi.
       this.logger.warn(
-        `SMS jo'natilmadi (${phone}): ${(error as Error).message}. Invite link API javobida qaytariladi.`,
+        `SMS jo'natilmadi (${phone}): ${(error as Error).message}. ` +
+          `Invite link API javobida qaytariladi.`,
       );
+      return { token, smsSent: false };
     }
-    return token;
   }
 
   /**
