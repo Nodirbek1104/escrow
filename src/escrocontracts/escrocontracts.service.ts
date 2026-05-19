@@ -9,7 +9,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
 import {
-  CreatorRole,
+  ContractType,
   EscrowContract,
   EscrowStatus,
 } from './entities/escrocontract.entity';
@@ -53,7 +53,7 @@ export class EscrocontractsService {
   /** Buyer userId for either flow: creator if buyer-created, otherwise the
    *  invitee that has already accepted. May be null if invitee not registered. */
   private getBuyerId(c: EscrowContract): number | null {
-    return c.creatorRole === CreatorRole.EXECUTOR
+    return c.contractType === ContractType.EXECUTOR_INITIATED
       ? (c.executorId ?? null)
       : c.creatorId;
   }
@@ -61,7 +61,7 @@ export class EscrocontractsService {
   /** Executor userId for either flow: creator if executor-created, otherwise
    *  the invitee that has already accepted. */
   private getExecutorId(c: EscrowContract): number | null {
-    return c.creatorRole === CreatorRole.EXECUTOR
+    return c.contractType === ContractType.EXECUTOR_INITIATED
       ? c.creatorId
       : (c.executorId ?? null);
   }
@@ -69,7 +69,7 @@ export class EscrocontractsService {
 /** True when `user` is the buyer of this contract (creator or invitee). */
 private isBuyerActing(c: EscrowContract, user: any): boolean {
   // Buyer-created: creator = buyer
-  if (c.creatorRole === CreatorRole.BUYER) {
+  if (c.contractType === ContractType.BUYER_INITIATED) {
     return user.userId === c.creatorId;
   }
   
@@ -86,7 +86,7 @@ private isBuyerActing(c: EscrowContract, user: any): boolean {
 /** True when `user` is the executor of this contract. */
 private isExecutorActing(c: EscrowContract, user: any): boolean {
   // Executor-created: creator = executor
-  if (c.creatorRole === CreatorRole.EXECUTOR) {
+  if (c.contractType === ContractType.EXECUTOR_INITIATED) {
     return user.userId === c.creatorId;
   }
   
@@ -256,7 +256,7 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
         Number(dto.amount),
         this.settings.getCommissionPercent(),
       );
-      const role = dto.creatorRole ?? CreatorRole.BUYER;
+      const role = dto.contractType ?? ContractType.BUYER_INITIATED;
 
       // Escrow needs two distinct parties — refuse a contract where the
       // creator and the invitee are the same phone. Without this guard
@@ -278,7 +278,7 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
       // Executor-created (Offer) flow: creator pre-selects the payout card
       // because they're the one who will receive funds. Verify ownership.
       let receiverCardId: string | null = null;
-      if (role === CreatorRole.EXECUTOR) {
+      if (role === ContractType.EXECUTOR_INITIATED) {
         if (!dto.receiverCardId) {
           throw new BadRequestException(
             'Ijrochi sifatida yaratganda pul qabul qiluvchi kartani tanlash shart',
@@ -301,7 +301,7 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
         technicalTermsFile: filePath,
         status: EscrowStatus.PENDING,
         creatorId: user.userId,
-        creatorRole: role,
+        contractType: role,
         // For executor-created contracts, the creator IS the executor and
         // their receiver card is known up front. The `executorId` column
         // here is reused as "invitee user id", so it stays NULL until the
@@ -383,7 +383,7 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
         if (!data?.cardId) {
           throw new BadRequestException('Shartnomani tasdiqlash uchun karta kiritish shart!');
         }
-        if (contract.creatorRole === CreatorRole.BUYER && !contract.receiverCardId) {
+        if (contract.contractType === ContractType.BUYER_INITIATED && !contract.receiverCardId) {
           throw new BadRequestException(
             "Avval ijrochi pul qabul qiluvchi kartani tanlashi kerak",
           );
@@ -403,7 +403,7 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
           contract.senderCardId = data.cardId;
           // For executor-created flow, this is also the moment the buyer
           // joins the contract — record their userId on the invitee slot.
-          if (contract.creatorRole === CreatorRole.EXECUTOR && !contract.executorId) {
+          if (contract.contractType === ContractType.EXECUTOR_INITIATED && !contract.executorId) {
             contract.executorId = user.userId;
           }
           contract.status = EscrowStatus.PAYMENT_HELD;
@@ -427,7 +427,7 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
         }
       } else if (status === EscrowStatus.ACCEPTED && this.isExecutorActing(contract, user)) {
         // Executor accepting + setting receiver card (buyer-created flow).
-        if (contract.creatorRole === CreatorRole.EXECUTOR) {
+        if (contract.contractType === ContractType.EXECUTOR_INITIATED) {
           throw new BadRequestException("Bu shartnomada qabul qilish bosqichi yo'q — xaridor to'lashini kuting");
         }
         if (!data?.cardId) {

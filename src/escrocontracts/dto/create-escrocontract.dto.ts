@@ -9,7 +9,7 @@ import {
   Min,
   Max,
 } from 'class-validator';
-import { CreatorRole } from '../entities/escrocontract.entity';
+import { ContractType } from '../entities/escrocontract.entity';
 
 export class CreateEscrowContractDto {
   @IsString()
@@ -31,11 +31,12 @@ export class CreateEscrowContractDto {
   @IsNotEmpty()
   executorPhoneNumber!: string;
 
-  /** Who is creating: buyer (default — invites executor) or executor
-   *  (publishes an Offer — invites buyer). */
+  /** Shartnoma turi: `buyer_initiated` (xaridor taklif qiladi, ijrochini
+   *  chaqiradi) yoki `executor_initiated` (ijrochi "Offer" e'lon qiladi,
+   *  xaridor kelib to'laydi). Default — buyer_initiated. */
   @IsOptional()
-  @IsEnum(CreatorRole)
-  creatorRole?: CreatorRole;
+  @IsEnum(ContractType)
+  contractType?: ContractType;
 
   /** Required when creatorRole='executor': the executor's payout card,
    *  pre-selected at creation time so the buyer just pays. */

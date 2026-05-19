@@ -4,9 +4,16 @@ import {
 } from 'typeorm';
 import { User } from '../../user/entities/user.entity';
 
-export enum CreatorRole {
-  BUYER = 'buyer',
-  EXECUTOR = 'executor',
+/**
+ * Shartnoma turi — bazada faqat ikki tomon (xaridor va ijrochi) bo'ladi,
+ * lekin contract_type qaysi tomondan boshlanganligini ko'rsatadi. Buni
+ * tushuncha sifatida olish: "buyer_initiated" = xaridor o'z taklifini
+ * yaratdi va ijrochini taklif qildi; "executor_initiated" = ijrochi
+ * "Offer" ko'rinishida xizmat e'lon qildi va xaridor (mijoz) qabul qiladi.
+ */
+export enum ContractType {
+  BUYER_INITIATED = 'buyer_initiated',
+  EXECUTOR_INITIATED = 'executor_initiated',
 }
 
 export enum EscrowStatus {
@@ -108,17 +115,18 @@ export class EscrowContract {
   status!: EscrowStatus;
 
   /**
-   * Who created the contract: 'buyer' (default — buyer makes the offer and
-   * invites an executor) or 'executor' (executor publishes an "Offer" and
-   * invites a buyer to fund it). Affects which side has to pay vs. accept,
-   * but the rest of the flow (charge / payout / cancel) is identical.
+   * Shartnoma qaysi tomondan boshlanganini ko'rsatadi. Ishtirokchilar
+   * ro'yxati har doim ikki tomon: xaridor (buyer) va ijrochi (executor) —
+   * contract_type esa shu jufdan qaysi biri boshlovchi rolida ekanini
+   * aytadi. Bu pul oqimini emas, faqat UI/UX dispatchini boshqaradi
+   * (charge / payout / cancel logikasi har ikkala holatda bir xil).
    */
   @Column({
-    type: 'enum',
-    enum: CreatorRole,
-    default: CreatorRole.BUYER,
+    type: 'varchar',
+    length: 32,
+    default: ContractType.BUYER_INITIATED,
   })
-  creatorRole!: CreatorRole;
+  contractType!: ContractType;
 
   @Column()
   executorPhoneNumber!: string;
