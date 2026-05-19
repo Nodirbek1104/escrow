@@ -129,6 +129,60 @@ export class MessagesService {
     }) as Promise<Message>;
   }
 
+  /**
+   * Forward an existing message into a different contract chat. The caller
+   * must participate in BOTH the source (to read the original) and the
+   * target (to send into it). The forwarded copy carries a frozen snapshot
+   * of the source so we can render "Forwarded from X" even after edits.
+   */
+  async forwardMessage(args: {
+    sourceMessageId: number;
+    targetContractId: number;
+    user: InboxUser;
+  }) {
+    const source = await this.messageRepository.findOne({
+      where: { id: args.sourceMessageId },
+      relations: ['sender'],
+    });
+    if (!source) throw new NotFoundException('Xabar topilmadi');
+    if (source.deletedAt) {
+      throw new BadRequestException("O'chirilgan xabarni forward qilib bo'lmaydi");
+    }
+    if (source.type !== 'user') {
+      throw new BadRequestException('Tizim xabarini forward qilib bo\'lmaydi');
+    }
+
+    const [sourceContract, targetContract] = await Promise.all([
+      this.contractRepository.findOne({ where: { id: source.contractId } }),
+      this.contractRepository.findOne({ where: { id: args.targetContractId } }),
+    ]);
+    if (!sourceContract || !targetContract) {
+      throw new NotFoundException('Shartnoma topilmadi');
+    }
+    this.assertContractParticipant(sourceContract, args.user);
+    this.assertContractParticipant(targetContract, args.user);
+
+    const forwarded = this.messageRepository.create({
+      contractId: args.targetContractId,
+      content: source.content,
+      fileUrl: source.fileUrl,
+      senderId: args.user.userId,
+      type: 'user',
+      forwardedFrom: {
+        originalMessageId: source.id,
+        sourceContractId: source.contractId,
+        sourceContractTitle: sourceContract.title ?? null,
+        senderId: source.senderId,
+        senderName: source.sender?.fullName ?? null,
+      },
+    });
+    const saved = await this.messageRepository.save(forwarded);
+    return this.messageRepository.findOne({
+      where: { id: saved.id },
+      relations: ['sender'],
+    }) as Promise<Message>;
+  }
+
   /** Persist a system note in a contract chat (status change, etc.) */
   async createSystem(
     contractId: number,

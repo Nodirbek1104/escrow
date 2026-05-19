@@ -43,6 +43,21 @@ export class Message {
   @Column({ type: 'jsonb', nullable: true })
   systemPayload?: Record<string, any> | null;
 
+  /**
+   * Forward provenance — set when this message was forwarded from another
+   * chat. Stored as a frozen snapshot of the source so we can render
+   * "Forwarded from X" even if the original sender renames, leaves the
+   * contract, or the source is deleted. Null for non-forwarded messages.
+   */
+  @Column({ type: 'jsonb', nullable: true })
+  forwardedFrom?: {
+    originalMessageId: number;
+    sourceContractId: number;
+    sourceContractTitle: string | null;
+    senderId: number;
+    senderName: string | null;
+  } | null;
+
   @ManyToOne(() => EscrowContract, (contract) => contract.id)
   contract: EscrowContract;
 

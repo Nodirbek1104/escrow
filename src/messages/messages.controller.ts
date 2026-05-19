@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  Body,
   Controller,
   DefaultValuePipe,
   Delete,
@@ -20,6 +21,7 @@ import { extname, join } from 'path';
 import { existsSync } from 'fs';
 import type { Response } from 'express';
 import { MessagesService } from './messages.service';
+import { MessagesGateway } from './messages.gateway';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { TelegramGuard } from '../auth/guards/telegram.guard';
 
@@ -27,7 +29,10 @@ const MESSAGES_UPLOAD_DIR = join(process.cwd(), 'uploads', 'messages');
 
 @Controller('messages')
 export class MessagesController {
-  constructor(private readonly messagesService: MessagesService) {}
+  constructor(
+    private readonly messagesService: MessagesService,
+    private readonly gateway: MessagesGateway,
+  ) {}
 
   /**
    * Inbox: every contract the user participates in + last message +
@@ -61,6 +66,34 @@ export class MessagesController {
     @Param('id', ParseIntPipe) id: number,
   ) {
     return this.messagesService.setArchived(req.user.userId, id, false);
+  }
+
+  /**
+   * Forward a message from one contract chat into another. Sender must be
+   * a participant in both contracts; service throws 404 otherwise.
+   */
+  @Post('forward')
+  @UseGuards(JwtAuthGuard, TelegramGuard)
+  async forward(
+    @Req() req: any,
+    @Body() body: { messageId: number; targetContractId: number },
+  ) {
+    if (!body?.messageId || !body?.targetContractId) {
+      throw new BadRequestException('messageId va targetContractId majburiy');
+    }
+    const forwarded = await this.messagesService.forwardMessage({
+      sourceMessageId: body.messageId,
+      targetContractId: body.targetContractId,
+      user: req.user,
+    });
+    // Push to the target chat socket room so participants get an
+    // instant update without polling.
+    this.gateway.emitToContract(
+      body.targetContractId,
+      'newMessage',
+      forwarded,
+    );
+    return forwarded;
   }
 
   /** Sum of unread across all of the user's contracts (for a global badge). */
