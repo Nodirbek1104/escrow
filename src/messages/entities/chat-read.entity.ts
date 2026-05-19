@@ -29,6 +29,14 @@ export class ChatRead {
   @Column({ type: 'timestamp', default: () => 'CURRENT_TIMESTAMP' })
   lastReadAt!: Date;
 
+  /**
+   * Per-user archive flag. When set, the inbox hides this contract from
+   * the default view but the user can still surface it via an "Arxiv"
+   * filter. New incoming messages auto-unarchive (set back to null).
+   */
+  @Column({ type: 'timestamp', nullable: true })
+  archivedAt?: Date | null;
+
   @UpdateDateColumn()
   updatedAt!: Date;
 }

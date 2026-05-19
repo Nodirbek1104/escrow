@@ -29,11 +29,38 @@ const MESSAGES_UPLOAD_DIR = join(process.cwd(), 'uploads', 'messages');
 export class MessagesController {
   constructor(private readonly messagesService: MessagesService) {}
 
-  /** Inbox: every contract the user participates in + last message + unread count. */
+  /**
+   * Inbox: every contract the user participates in + last message +
+   * unread count. Pass `?archived=true` for the archive bin view.
+   */
   @Get('inbox')
   @UseGuards(JwtAuthGuard, TelegramGuard)
-  async getInbox(@Req() req: any) {
-    return this.messagesService.getInbox(req.user);
+  async getInbox(
+    @Req() req: any,
+    @Query('archived') archived?: string,
+  ) {
+    return this.messagesService.getInbox(req.user, {
+      archivedOnly: archived === 'true' || archived === '1',
+    });
+  }
+
+  /** Archive or un-archive a contract chat for the current user. */
+  @Post('contract/:id/archive')
+  @UseGuards(JwtAuthGuard, TelegramGuard)
+  async archive(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
+    return this.messagesService.setArchived(req.user.userId, id, true);
+  }
+
+  @Delete('contract/:id/archive')
+  @UseGuards(JwtAuthGuard, TelegramGuard)
+  async unarchive(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
+    return this.messagesService.setArchived(req.user.userId, id, false);
   }
 
   /** Sum of unread across all of the user's contracts (for a global badge). */

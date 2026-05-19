@@ -212,9 +212,12 @@ export class MessagesService {
     };
   }
 
-  /** Per-user inbox: every contract the user participates in, with the
-   *  last message and an unread count. Sorted by last activity. */
-  async getInbox(user: InboxUser) {
+  /**
+   * Per-user inbox. Default view hides archived chats; pass
+   * `{ archivedOnly: true }` to see only the archive bin. Sorted by
+   * last activity descending either way.
+   */
+  async getInbox(user: InboxUser, opts?: { archivedOnly?: boolean }) {
     const phoneDigits = (user.phoneNumber ?? '').replace(/\D/g, '');
 
     // Find all contracts the user is part of (creator, linked executor, or
@@ -237,7 +240,12 @@ export class MessagesService {
       where: { userId: user.userId, contractId: In(ids) },
     });
     const readByContract = new Map<number, Date>();
-    for (const r of reads) readByContract.set(r.contractId, r.lastReadAt);
+    const archivedByContract = new Map<number, Date>();
+    for (const r of reads) {
+      readByContract.set(r.contractId, r.lastReadAt);
+      if (r.archivedAt) archivedByContract.set(r.contractId, r.archivedAt);
+    }
+    const archivedOnly = !!opts?.archivedOnly;
 
     // For each contract: (last message, unread count) — small N (typical
     // user has dozens, not thousands), parallelisable.
@@ -285,17 +293,27 @@ export class MessagesService {
             : null,
           lastActivityAt: lastMsg?.createdAt ?? c.createdAt,
           unreadCount,
+          archivedAt: archivedByContract.get(c.id) ?? null,
         };
       }),
     );
 
-    rows.sort(
+    // Auto-unarchive: if a new message arrived after the user archived,
+    // surface the chat again. Otherwise filter to match the requested view.
+    const filtered = rows.filter((r) => {
+      if (!r.archivedAt) return !archivedOnly;
+      const stillArchived =
+        new Date(r.lastActivityAt) <= new Date(r.archivedAt);
+      return archivedOnly ? stillArchived : !stillArchived;
+    });
+
+    filtered.sort(
       (a, b) =>
         new Date(b.lastActivityAt).getTime() -
         new Date(a.lastActivityAt).getTime(),
     );
 
-    return rows;
+    return filtered;
   }
 
   /** Pin a message in the contract chat. Any participant or admin may pin. */
@@ -399,6 +417,27 @@ export class MessagesService {
     m.content = '';
     m.fileUrl = null as any;
     return this.messageRepository.save(m);
+  }
+
+  /**
+   * Toggle the per-user archive flag on a contract chat. Idempotent on the
+   * upsert path. Returns the new state so the FE can update its view
+   * without a refetch.
+   */
+  async setArchived(userId: number, contractId: number, archived: boolean) {
+    let read = await this.chatReadRepository.findOne({
+      where: { userId, contractId },
+    });
+    if (!read) {
+      read = this.chatReadRepository.create({
+        userId,
+        contractId,
+        lastReadAt: new Date(),
+      });
+    }
+    read.archivedAt = archived ? new Date() : null;
+    await this.chatReadRepository.save(read);
+    return { ok: true, archived: !!read.archivedAt };
   }
 
   /** Mark all messages in a contract as read for the given user.
