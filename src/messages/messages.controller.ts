@@ -1,16 +1,18 @@
 import {
   BadRequestException,
   Controller,
+  DefaultValuePipe,
   Delete,
   Get,
   Param,
+  ParseIntPipe,
   Post,
+  Query,
   Req,
   Res,
   UploadedFile,
   UseGuards,
   UseInterceptors,
-  ParseIntPipe,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
@@ -46,8 +48,13 @@ export class MessagesController {
   async getByContract(
     @Req() req: any,
     @Param('id', ParseIntPipe) id: number,
+    @Query('before', new DefaultValuePipe(0), ParseIntPipe) before: number,
+    @Query('limit', new DefaultValuePipe(50), ParseIntPipe) limit: number,
   ) {
-    return this.messagesService.findByContract(id, req.user?.userId);
+    return this.messagesService.findByContract(id, req.user?.userId, {
+      before: before > 0 ? before : undefined,
+      limit,
+    });
   }
 
   /** Mark all messages in this contract as read for the current user. */

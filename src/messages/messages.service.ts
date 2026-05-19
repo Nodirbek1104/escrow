@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, MoreThan, Not, Repository } from 'typeorm';
+import { In, LessThan, MoreThan, Not, Repository } from 'typeorm';
 import axios from 'axios';
 import { Message } from './entities/message.entity';
 import { ChatRead } from './entities/chat-read.entity';
@@ -145,16 +145,50 @@ export class MessagesService {
     return this.messageRepository.save(message);
   }
 
-  async findByContract(contractId: number, userId?: number) {
-    const messages = await this.messageRepository.find({
-      where: { contractId },
-      order: { createdAt: 'ASC' },
+  /**
+   * Cursor-based pagination. Default behaviour (no `before`) returns the
+   * most recent `limit` messages in chronological order — i.e. the page
+   * a user sees on first open. `before` clamps to messages strictly older
+   * than the given id so the FE can prepend earlier history on scroll-up.
+   *
+   * `hasMore` is true when at least one message exists older than the
+   * earliest in the returned page; the FE uses this to stop polling.
+   */
+  async findByContract(
+    contractId: number,
+    userId?: number,
+    opts?: { before?: number; limit?: number },
+  ) {
+    const limit = Math.max(1, Math.min(opts?.limit ?? 50, 100));
+    const before = opts?.before;
+
+    const whereClause: Record<string, any> = { contractId };
+    if (before && before > 0) {
+      whereClause.id = LessThan(before);
+    }
+
+    // Fetch newest-first then reverse so the FE keeps its
+    // chronological-ascending render order.
+    const newestFirst = await this.messageRepository.find({
+      where: whereClause,
+      order: { id: 'DESC' },
+      take: limit,
       relations: ['sender', 'replyTo', 'replyTo.sender'],
     });
+    const messages = newestFirst.slice().reverse();
 
-    // Annotate each message with readByOther for the ✓ / ✓✓ ticks UI.
-    // For 2-party contracts (creator + executor), "other party's lastReadAt"
-    // suffices; we read every party's pointer except the requester's.
+    // Does anything exist older than the earliest one we returned?
+    let hasMore = false;
+    if (messages.length === limit) {
+      const oldestId = messages[0]?.id;
+      if (oldestId) {
+        const older = await this.messageRepository.count({
+          where: { contractId, id: LessThan(oldestId) },
+        });
+        hasMore = older > 0;
+      }
+    }
+
     const otherReads = await this.chatReadRepository.find({
       where: { contractId },
     });
@@ -166,12 +200,16 @@ export class MessagesService {
         )
       : null;
 
-    return messages.map((m) => ({
-      ...m,
-      readByOther: otherLastReadAt
-        ? new Date(m.createdAt) <= otherLastReadAt
-        : false,
-    }));
+    return {
+      messages: messages.map((m) => ({
+        ...m,
+        readByOther: otherLastReadAt
+          ? new Date(m.createdAt) <= otherLastReadAt
+          : false,
+      })),
+      hasMore,
+      oldestId: messages[0]?.id ?? null,
+    };
   }
 
   /** Per-user inbox: every contract the user participates in, with the
