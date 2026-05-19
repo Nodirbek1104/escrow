@@ -54,7 +54,7 @@ export class Message {
     originalMessageId: number;
     sourceContractId: number;
     sourceContractTitle: string | null;
-    senderId: number;
+    senderId: number | null;
     senderName: string | null;
   } | null;
 
@@ -64,12 +64,18 @@ export class Message {
   @Column()
   contractId: number;
 
-  @ManyToOne(() => User, { nullable: true })
-  sender: User;
+  @ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'senderId' })
+  sender!: User | null;
 
-  /** 0 for system messages with no sender. */
-  @Column({ default: 0 })
-  senderId: number;
+  /**
+   * Real participant's user id, or NULL for system-generated bubbles
+   * (status changes, dispute announcements). Storing `0` here used to
+   * violate the FK constraint to "user.id" — Postgres rejected every
+   * system message and the entire status-transition flow downstream.
+   */
+  @Column({ type: 'integer', nullable: true })
+  senderId!: number | null;
 
   @CreateDateColumn()
   createdAt: Date;

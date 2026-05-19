@@ -192,7 +192,7 @@ export class MessagesService {
     const message = this.messageRepository.create({
       contractId,
       content,
-      senderId: 0,
+      senderId: null,
       type: 'system',
       systemPayload: payload ?? null,
     });

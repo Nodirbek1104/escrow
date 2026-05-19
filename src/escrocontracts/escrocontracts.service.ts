@@ -258,6 +258,23 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
       );
       const role = dto.creatorRole ?? CreatorRole.BUYER;
 
+      // Escrow needs two distinct parties — refuse a contract where the
+      // creator and the invitee are the same phone. Without this guard
+      // a user can "sign" a contract with themselves, which both sides of
+      // our role logic (isBuyerActing / isExecutorActing) then evaluate
+      // to true and the UI breaks at runtime.
+      const creatorPhoneDigits = this.normalizePhone(user.phoneNumber);
+      const inviteePhoneDigits = this.normalizePhone(dto.executorPhoneNumber);
+      if (
+        creatorPhoneDigits &&
+        inviteePhoneDigits &&
+        creatorPhoneDigits === inviteePhoneDigits
+      ) {
+        throw new BadRequestException(
+          "O'zingizga shartnoma yarata olmaysiz — boshqa tomon raqamini kiriting",
+        );
+      }
+
       // Executor-created (Offer) flow: creator pre-selects the payout card
       // because they're the one who will receive funds. Verify ownership.
       let receiverCardId: string | null = null;
