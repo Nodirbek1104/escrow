@@ -839,41 +839,66 @@ private normalizePhone(phone: string | null | undefined): string {
     return token;
   }
 
+  /**
+   * Allowed status transitions. Each key is the current status; the value
+   * is the set of next statuses a request can ask for. Anything not listed
+   * is rejected with 400, eliminating ad-hoc jumps (e.g. PENDING → COMPLETED)
+   * that previously slipped through and left contracts in inconsistent
+   * states. Terminal states (COMPLETED / CANCELLED / REJECTED) have no
+   * outgoing edges.
+   */
+  private static readonly ALLOWED_TRANSITIONS: Record<EscrowStatus, EscrowStatus[]> = {
+    [EscrowStatus.DRAFT]: [EscrowStatus.PENDING, EscrowStatus.CANCELLED],
+    [EscrowStatus.PENDING]: [
+      EscrowStatus.ACCEPTED,       // invitee accepts (buyer-created flow)
+      EscrowStatus.PAYMENT_HELD,   // invitee pays directly (executor-created flow)
+      EscrowStatus.REJECTED,
+      EscrowStatus.CANCELLED,
+    ],
+    [EscrowStatus.ACCEPTED]: [
+      EscrowStatus.PAYMENT_HELD,   // buyer pays
+      EscrowStatus.CANCELLED,
+    ],
+    [EscrowStatus.PAYMENT_HELD]: [
+      EscrowStatus.ACTIVE,         // work officially starts
+      EscrowStatus.COMPLETED,      // buyer releases directly
+      EscrowStatus.DISPUTED,
+      EscrowStatus.CANCELLED,      // mutual cancel + refund
+    ],
+    [EscrowStatus.ACTIVE]: [
+      EscrowStatus.COMPLETED,
+      EscrowStatus.REVISION,
+      EscrowStatus.DISPUTED,
+      EscrowStatus.CANCELLED,
+    ],
+    [EscrowStatus.REVISION]: [
+      EscrowStatus.ACTIVE,
+      EscrowStatus.DISPUTED,
+      EscrowStatus.CANCELLED,
+    ],
+    [EscrowStatus.DISPUTED]: [
+      EscrowStatus.COMPLETED,      // admin force-completes
+      EscrowStatus.CANCELLED,      // admin refunds
+    ],
+    [EscrowStatus.COMPLETED]: [],
+    [EscrowStatus.CANCELLED]: [],
+    [EscrowStatus.REJECTED]: [],
+  };
+
   private validateStatusTransition(current: EscrowStatus, next: EscrowStatus) {
-    if (current === EscrowStatus.COMPLETED || current === EscrowStatus.CANCELLED) {
-      throw new BadRequestException('Yopilgan shartnomani o‘zgartirib bo‘lmaydi');
+    if (current === next) {
+      // Idempotent re-sends are confusing; force the caller to know.
+      throw new BadRequestException(
+        "Shartnoma allaqachon shu holatda — qayta yuborish kerakmas",
+      );
+    }
+    const allowed = EscrocontractsService.ALLOWED_TRANSITIONS[current] ?? [];
+    if (!allowed.includes(next)) {
+      throw new BadRequestException(
+        `"${current}" holatidan "${next}" holatiga o'tib bo'lmaydi`,
+      );
     }
   }
-
-// async getContractByToken(token: string, user: any) {
-//   const raw = await this.redis.get(`contract_invite:${token}`);
-//   if (!raw) throw new BadRequestException("Link muddati o'tgan");
-
-//   const payload = JSON.parse(raw);
-
-//   // 1. O'zgaruvchilarni xavfsiz olish (String() va ?. ishlatish)
-//   // Bu yerda payload.phone yoki user.phoneNumber bo'lmasa, replace ishga tushmaydi
-//  const payloadPhone = this.normalizePhone(payload.phone);
-// const userPhone = this.normalizePhone(user.phoneNumber);
-//   // 2. Agar foydalanuvchida raqam bo'lmasa, aniq xato beramiz
-//   if (!userPhone) {
-//     this.logger.error(`Foydalanuvchi ob'ektida phoneNumber topilmadi: ${JSON.stringify(user)}`);
-//     throw new ForbiddenException("Profilingizda telefon raqami ko'rsatilmagan (JWT xatosi)");
-//   }
-
-//   // 3. Agar Redis dagi payloadda raqam bo'lmasa
-//   if (!payloadPhone) {
-//     throw new BadRequestException("Link ma'lumotlari buzilgan yoki telefon raqami topilmadi");
-//   }
-
-//   if (payloadPhone !== userPhone) {
-//     // IDOR-safe: don't confirm the link is valid for someone else; pretend
-//     // it's invalid to the wrong user too.
-//     throw new NotFoundException('Taklif yaroqsiz yoki muddati o‘tgan');
-//   }
-
-//   return this.findOne(payload.contractId, user);
-// }
 
   async findAllByUser(user: any) {
     return this.contractRepo.find({
