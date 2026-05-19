@@ -29,10 +29,16 @@ dotenv.config();
       isGlobal: true, 
     }),
     ServeStaticModule.forRoot({
-      rootPath: process.env.NODE_ENV === 'production' 
-        ? '/home/ubuntu/escro-frontend/dist/client' 
+      rootPath: process.env.NODE_ENV === 'production'
+        ? '/home/ubuntu/escro-frontend/dist/client'
         : join(__dirname, '..', 'uploads'),
-      exclude: ['/api*'],
+      // Express 5 + path-to-regexp 8 naked '*'ni qabul qilmaydi
+      // (TypeError: Missing parameter name at index 5: /api*). Yangi
+      // syntax: named wildcard `{*splat}`. `/api` o'zi alohida
+      // ko'rsatiladi — `{*splat}` faqat /-dan keyingi bo'laklarni
+      // ushlaydi. Bu kombinatsiya naked /api dan /api/anything/here
+      // gacha hammasini static fallback'dan chiqarib turadi.
+      exclude: ['/api', '/api/{*splat}'],
     }),
     // Single default throttler bucket. Per-route stricter limits are
     // applied with `@Throttle({ default: { limit, ttl } })`. We
