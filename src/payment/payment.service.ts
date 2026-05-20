@@ -529,13 +529,14 @@ export class PaymentService {
     amountSum: number,
     contractId: string | number,
   ) {
+    const amountTiyin = sumToTiyin(amountSum);
+    const externalId = this.buildExternalId(contractId, 'hold');
+    let tx: PaymentTransaction | undefined;
+
     try {
       await this.assertCardOwnedByUser(userId, cardId);
 
-      const amountTiyin = sumToTiyin(amountSum);
-      const externalId = this.buildExternalId(contractId, 'hold');
-
-      const tx = await this.upsertTx({
+      tx = await this.upsertTx({
         type: TransactionType.HOLD,
         contractId:
           typeof contractId === 'number' ? contractId : Number(contractId),
@@ -574,6 +575,25 @@ export class PaymentService {
 
       return data;
     } catch (error) {
+      // Critical: mark the tx FAILED before returning. Without this, a
+      // thrown Paylov error (4xx, network 404 page, timeout) leaves the
+      // tx row stuck in 'pending' forever — UI then renders it as
+      // "Mablag' muzlatildi" (because the type is 'hold') misleading
+      // the user into thinking the hold succeeded.
+      if (tx) {
+        try {
+          tx.status = TransactionStatus.FAILED;
+          tx.lastError = {
+            message: (error as Error).message,
+            response: (error as any)?.response?.data,
+          };
+          await this.txRepository.save(tx);
+        } catch (saveErr) {
+          this.logger.warn(
+            `holdFunds: failed to mark tx as FAILED: ${(saveErr as Error).message}`,
+          );
+        }
+      }
       this.logger.error(`Paylov holdFunds: ${error}`);
       return handlePaymentError(error);
     }
