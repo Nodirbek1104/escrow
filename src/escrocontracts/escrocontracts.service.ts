@@ -463,9 +463,12 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
       });
 
       const saved = await this.contractRepo.save(contract);
+      const inviterName =
+        user.fullName || (user.phoneNumber as string) || "Foydalanuvchi";
       const { token, smsSent } = await this.sendInviteSms(
         saved,
         dto.executorPhoneNumber,
+        inviterName,
       );
       const inviteLink = `${FRONTEND_URL}/invite/${token}`;
 
@@ -1051,6 +1054,7 @@ private normalizePhone(phone: string | null | undefined): string {
   private async sendInviteSms(
     contract: EscrowContract,
     phone: string,
+    inviterName: string,
   ): Promise<{ token: string; smsSent: boolean }> {
     const token = uuidv4();
     await this.redis.setex(
@@ -1060,12 +1064,11 @@ private normalizePhone(phone: string | null | undefined): string {
     );
 
     const inviteLink = `${FRONTEND_URL}/invite/${token}`;
-    const amountFmt = new Intl.NumberFormat('uz-UZ').format(
-      Math.round(contract.amount),
-    );
-    const message =
-      `ESCRO platformasida sizga "${contract.title}" shartnomasi taklif qilindi (${amountFmt} so'm). ` +
-      `Tasdiqlash uchun: ${inviteLink}`;
+    // Eskiz tasdiqlagan template format: "ESCRO: {ism} sizni
+    // #{id}-bitimga taklif qildi: {link}". Variable substitution
+    // moderation paytida ko'rsatilgan misol shaklida (777 va abc123)
+    // — Eskiz haqiqiy qiymatlarga avtomatik almashtiradi.
+    const message = `ESCRO: ${inviterName} sizni #${contract.id}-bitimga taklif qildi: ${inviteLink}`;
 
     this.logger.log(`Invite link for ${phone}: ${inviteLink}`);
 
