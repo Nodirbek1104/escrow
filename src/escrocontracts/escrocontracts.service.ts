@@ -564,7 +564,19 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
   ) {
     try {
       const contract = await this.findOne(id, user);
-      this.validateStatusTransition(contract.status, status);
+
+      // The API uses `status=accepted` as the trigger for TWO distinct
+      // transitions depending on the actor:
+      //   • buyer + status=accepted ⇒ hold-funds, real target = PAYMENT_HELD
+      //   • executor + status=accepted ⇒ set card + accept, real target = ACCEPTED
+      // We compute the real target BEFORE validating the transition so
+      // the FSM doesn't reject "buyer pays already-accepted contract"
+      // with a misleading "same status" error.
+      const effectiveTarget =
+        status === EscrowStatus.ACCEPTED && this.isBuyerActing(contract, user)
+          ? EscrowStatus.PAYMENT_HELD
+          : status;
+      this.validateStatusTransition(contract.status, effectiveTarget);
 
       // ACCEPTED transition has two distinct meanings depending on who is
       // acting and the contract's creatorRole:
