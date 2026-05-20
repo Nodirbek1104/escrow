@@ -552,7 +552,7 @@ export class PaymentService {
         };
       }
 
-      const { data } = await this.client.post('/payment/hold/create/', {
+      const { data } = await this.client.post('/merchant/payment/hold/create/', {
         userId: String(userId),
         cardId,
         amount: amountTiyin,
@@ -599,7 +599,7 @@ export class PaymentService {
         amountTiyin,
       });
 
-      const { data } = await this.client.post('/payment/hold/charge/', {
+      const { data } = await this.client.post('/merchant/payment/hold/charge/', {
         transactionId,
         amount: amountTiyin,
       });
@@ -663,7 +663,7 @@ export class PaymentService {
         };
       }
 
-      const { data } = await this.client.post('/payment/hold/dismiss/', {
+      const { data } = await this.client.post('/merchant/payment/hold/dismiss/', {
         transactionId,
       });
 
