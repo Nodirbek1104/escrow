@@ -117,7 +117,7 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
       case EscrowStatus.ACCEPTED:
         return 'Ijrochi shartnomani qabul qildi.';
       case EscrowStatus.PAYMENT_HELD:
-        return "Xaridor mablag'ni muzlatdi. Ish kafolati ostida.";
+        return "✅ Shartnoma faol — ikkala tomon rozi bo'ldi va mablag' Escrow himoyasi ostida muzlatildi. Endi siz suhbatlashishingiz va ish bo'yicha kelishishingiz mumkin.";
       case EscrowStatus.ACTIVE:
         return 'Ish jarayoni boshlandi.';
       case EscrowStatus.COMPLETED:
