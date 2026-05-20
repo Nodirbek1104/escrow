@@ -325,6 +325,43 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
         saved.id.toString()
       );
 
+      // Notify invitee if they already have an account on the platform.
+      // Without this, a registered invitee would only learn about the
+      // contract via SMS (Eskiz can block) or by scrolling their inbox —
+      // they'd see no bell badge, no entry in /app/notifications. We
+      // also pre-link their userId on executorId so per-user queries
+      // (chats, my-contracts) pick the row up immediately on next refresh.
+      const inviteeLookupDigits = this.normalizePhone(dto.executorPhoneNumber);
+      if (inviteeLookupDigits) {
+        const candidates = await this.userRepo.find({
+          select: ['id', 'phoneNumber'],
+        });
+        const invitee = candidates.find(
+          (u) => this.normalizePhone(u.phoneNumber) === inviteeLookupDigits,
+        );
+        if (invitee && invitee.id !== user.userId) {
+          // Auto-link only on buyer-initiated flow. In executor-initiated,
+          // the executorId slot stores the invitee (buyer) too — same
+          // mechanic.
+          if (!saved.executorId) {
+            saved.executorId = invitee.id;
+            await this.contractRepo.update(
+              { id: saved.id },
+              { executorId: invitee.id },
+            );
+          }
+          await this.notificationsService
+            .create(
+              invitee.id,
+              "Sizga yangi shartnoma kelmoqda",
+              `${user.fullName ?? 'Buyurtmachi'} "${saved.title}" shartnomasiga sizni taklif qildi. Ko'rib chiqing va qabul qiling.`,
+              "contract_invite",
+              saved.id.toString(),
+            )
+            .catch(() => undefined);
+        }
+      }
+
       // Genesis system message in the contract chat
       await this.emitContractUpdated(saved);
 
