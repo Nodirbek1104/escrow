@@ -100,6 +100,35 @@ export class EscrowContract {
    */
   @Column({ type: 'timestamp', nullable: true })
   slaWarnedAt?: Date | null;
+
+  // ─── Audit timestamps ──────────────────────────────────────────────────
+  // Each status transition stamps the corresponding column. Lets us audit
+  // "when was this paid", "when was work delivered", show SLA progress on
+  // the FE, and answer analytics questions without trawling the
+  // payment_transactions log.
+
+  @Column({ type: 'timestamp', nullable: true })
+  acceptedAt?: Date | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  paidAt?: Date | null;
+
+  /** Set when the executor presses "Ishni topshirish". Also serves as the
+   *  cooldown / single-fire guard so they can't spam the buyer. */
+  @Column({ type: 'timestamp', nullable: true })
+  workDeliveredAt?: Date | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  completedAt?: Date | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  rejectedAt?: Date | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  disputedAt?: Date | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  cancelledAt?: Date | null;
   // --------------------------------------------
 
   @Column({ nullable: true })

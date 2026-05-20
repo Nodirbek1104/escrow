@@ -241,12 +241,29 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
         "Ishni topshirish faqat to'lov muzlatilgan yoki faol kontraktda mumkin",
       );
     }
+    // Single-fire guard — prevent executor spamming the buyer/chat. After
+    // the first delivery announcement, return idempotent OK without
+    // posting a second system message or notification.
+    if (contract.workDeliveredAt) {
+      return {
+        ok: true,
+        alreadyDelivered: true,
+        workDeliveredAt: contract.workDeliveredAt,
+      };
+    }
+
+    contract.workDeliveredAt = new Date();
+    await this.contractRepo.update(
+      { id: contract.id },
+      { workDeliveredAt: contract.workDeliveredAt },
+    );
+
     // Chat bubble — visible to both parties.
     try {
       const sys = await this.messagesService.createSystem(
         contract.id,
         "Ijrochi ishni yakunlanganini xabar qildi. Xaridor ko'rib mablag'ni yechishi mumkin.",
-        { kind: "work_delivered", at: new Date().toISOString() },
+        { kind: "work_delivered", at: contract.workDeliveredAt.toISOString() },
       );
       this.messagesGateway.emitToContract(contract.id, "newMessage", {
         ...sys,
@@ -270,7 +287,7 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
         )
         .catch(() => undefined);
     }
-    return { ok: true };
+    return { ok: true, workDeliveredAt: contract.workDeliveredAt };
   }
 
   /**
@@ -583,6 +600,7 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
             contract.executorId = user.userId;
           }
           contract.status = EscrowStatus.PAYMENT_HELD;
+          contract.paidAt = new Date();
         } else {
           const mapped = mapPaylovError({
             code: holdResult?.error?.code,
@@ -618,6 +636,7 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
         contract.receiverCardId = data.cardId;
         contract.executorId = user.userId;
         contract.status = EscrowStatus.ACCEPTED;
+        contract.acceptedAt = new Date();
       }
 
       // Shartnoma yakunlanganda pulni o'tkazish
@@ -685,6 +704,7 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
         }
 
         contract.status = EscrowStatus.COMPLETED;
+        contract.completedAt = new Date();
       }
 
       if (data?.reason) contract.rejectionReason = data.reason;
@@ -695,6 +715,7 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
           throw new BadRequestException('Nizo ochish uchun sabab ko‘rsatish shart!');
         }
         contract.status = EscrowStatus.DISPUTED;
+        contract.disputedAt = new Date();
         // Round-robin assign so participants see a named admin and the
         // load is spread evenly across the team. Only set on first entry
         // into DISPUTED — re-disputes after admin action keep the same lead.
@@ -704,6 +725,10 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
             contract.assignedAdminId = disputeLead.id;
           }
         }
+      }
+
+      if (status === EscrowStatus.REJECTED) {
+        contract.rejectedAt = new Date();
       }
 
       const savedContract = await this.contractRepo.save(contract);
@@ -929,8 +954,11 @@ private normalizePhone(phone: string | null | undefined): string {
         return contract;
       }
 
-      // COMPLETED yoki boshqa terminal holatlardan bekor qilib bo'lmaydi.
-      if (contract.status === EscrowStatus.COMPLETED) {
+      // Terminal holatlardan bekor qilib bo'lmaydi.
+      if (
+        contract.status === EscrowStatus.COMPLETED ||
+        contract.status === EscrowStatus.REJECTED
+      ) {
         throw new BadRequestException("Yakunlangan shartnomani bekor qilib bo'lmaydi");
       }
 
@@ -939,11 +967,31 @@ private normalizePhone(phone: string | null | undefined): string {
         throw new ForbiddenException('Nizodagi shartnomani faqat admin bekor qiladi');
       }
 
-      // Default: faqat xaridor bekor qila oladi (yoki admin).
-      // Xaridor — kontraktning buyerId'si (creatorRole'ga qarab).
-      const buyerId = this.getBuyerId(contract);
-      if (!isAdmin && buyerId !== user.userId) {
-        throw new ForbiddenException('Bekor qilish huquqi yo‘q');
+      // PENDING/ACCEPTED — pul muzlatilmagan, har ikkala tomon
+      // (creator yoki invitee/executor) bekor qila oladi. Bog'lovchi
+      // majburiyat hali yo'q.
+      // PAYMENT_HELD/ACTIVE/REVISION — pul muzlatilgan; faqat xaridor
+      // (yoki admin) qaytarib olishni so'ray oladi, ijrochi tomon ham
+      // istasa nizo orqali admin orqali bekor qiladi.
+      const moneyHeld =
+        contract.status === EscrowStatus.PAYMENT_HELD ||
+        contract.status === EscrowStatus.ACTIVE ||
+        contract.status === EscrowStatus.REVISION;
+      if (!isAdmin && moneyHeld) {
+        const buyerId = this.getBuyerId(contract);
+        if (buyerId !== user.userId) {
+          throw new ForbiddenException(
+            "Mablag' muzlatilgan bo'lsa faqat xaridor yoki admin bekor qiladi (ijrochi nizo ochishi mumkin)",
+          );
+        }
+      } else if (!isAdmin) {
+        // PENDING/ACCEPTED: yo creator yoki invitee bo'lishi shart.
+        const isParticipant =
+          this.isBuyerActing(contract, user) ||
+          this.isExecutorActing(contract, user);
+        if (!isParticipant) {
+          throw new ForbiddenException('Bekor qilish huquqi yo‘q');
+        }
       }
 
       // Hold mavjud bo'lsa, avval Paylov tomonida dismiss qilamiz; muvaffaqiyatsiz
@@ -971,6 +1019,7 @@ private normalizePhone(phone: string | null | undefined): string {
       }
 
       contract.status = EscrowStatus.CANCELLED;
+      contract.cancelledAt = new Date();
       const saved = await this.contractRepo.save(contract);
 
       // Ikki tarafni ham xabardor qilamiz.
