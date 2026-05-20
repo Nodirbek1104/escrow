@@ -138,6 +138,142 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
   }
 
   /**
+   * Compose a user-facing, action-oriented notification for the OTHER
+   * participant when a contract's status changes. Generic "status changed"
+   * leaves people guessing what to do next — these messages tell them.
+   *
+   * @param status   new status the contract just moved to
+   * @param contract saved contract row (for title / id reference)
+   * @param targetIsBuyer  true when the recipient is the buyer side
+   */
+  private statusChangeNotification(
+    status: EscrowStatus,
+    contract: EscrowContract,
+    targetIsBuyer: boolean,
+  ): { title: string; message: string; type: string } {
+    const tag = `#ESC-${contract.id}`;
+    switch (status) {
+      case EscrowStatus.ACCEPTED:
+        return targetIsBuyer
+          ? {
+              title: "Ijrochi qabul qildi — to'lov bosqichi",
+              message: `${tag} "${contract.title}" — ijrochi shartnomani qabul qildi va kartasini ulashdi. Endi mablag'ni muzlating.`,
+              type: "contract_accepted",
+            }
+          : {
+              title: "Shartnoma qabul qilindi",
+              message: `${tag} "${contract.title}" — siz qabul qildingiz. Xaridor pulni muzlatishini kuting.`,
+              type: "contract_accepted",
+            };
+      case EscrowStatus.PAYMENT_HELD:
+        return targetIsBuyer
+          ? {
+              title: "Pul muzlatildi",
+              message: `${tag} "${contract.title}" — mablag' Paylov muzlatildi. Ish bajarilgach 'Mablag'ni yechish' tugmasini bosing.`,
+              type: "payment_held",
+            }
+          : {
+              title: "Xaridor pulni muzlatdi — ish boshlash",
+              message: `${tag} "${contract.title}" — mablag' Escrow himoyasida. Ishni boshlashingiz mumkin, yakunlangach xaridorni xabardor qiling.`,
+              type: "payment_held",
+            };
+      case EscrowStatus.COMPLETED:
+        return targetIsBuyer
+          ? {
+              title: "Shartnoma yopildi",
+              message: `${tag} "${contract.title}" — to'lov ijrochiga o'tkazildi.`,
+              type: "contract_completed",
+            }
+          : {
+              title: "Mablag' kartangizga o'tkazildi! 🎉",
+              message: `${tag} "${contract.title}" — xaridor mablag'ni yechdi, pul kartangizda. Rahmat!`,
+              type: "contract_completed",
+            };
+      case EscrowStatus.CANCELLED:
+        return {
+          title: "Shartnoma bekor qilindi",
+          message: `${tag} "${contract.title}" — bekor qilindi. Muzlatilgan mablag' (agar bor bo'lsa) qaytarildi.`,
+          type: "contract_cancelled",
+        };
+      case EscrowStatus.REJECTED:
+        return {
+          title: "Ijrochi shartnomani rad etdi",
+          message: `${tag} "${contract.title}" — ijrochi rad etdi. Boshqa ijrochi taklif qiling yoki shartnomani qaytadan yarating.`,
+          type: "contract_rejected",
+        };
+      case EscrowStatus.DISPUTED:
+        return {
+          title: "Nizo ochildi",
+          message: `${tag} "${contract.title}" — nizo ochildi. Admin ko'rib chiqadi va siz bilan bog'lanishi mumkin.`,
+          type: "dispute_opened",
+        };
+      case EscrowStatus.REVISION:
+        return {
+          title: "Qayta ko'rib chiqish kerak",
+          message: `${tag} "${contract.title}" — ishni qayta ko'rib chiqish so'raldi.`,
+          type: "contract_revision",
+        };
+      default:
+        return {
+          title: "Shartnoma holati o'zgardi",
+          message: `${tag} "${contract.title}" — holat: ${status}.`,
+          type: "contract_update",
+        };
+    }
+  }
+
+  /**
+   * Executor signals work delivery — does NOT change status (only buyer
+   * can release funds via UPDATE_STATUS=completed). Posts a system bubble
+   * in the chat and pings the buyer with an action notification so they
+   * know to review and release.
+   */
+  async markDelivered(id: number, user: any) {
+    const contract = await this.findOne(id, user);
+    if (!this.isExecutorActing(contract, user)) {
+      throw new ForbiddenException("Faqat ijrochi ishni topshira oladi");
+    }
+    if (
+      contract.status !== EscrowStatus.PAYMENT_HELD &&
+      contract.status !== EscrowStatus.ACTIVE
+    ) {
+      throw new BadRequestException(
+        "Ishni topshirish faqat to'lov muzlatilgan yoki faol kontraktda mumkin",
+      );
+    }
+    // Chat bubble — visible to both parties.
+    try {
+      const sys = await this.messagesService.createSystem(
+        contract.id,
+        "Ijrochi ishni yakunlanganini xabar qildi. Xaridor ko'rib mablag'ni yechishi mumkin.",
+        { kind: "work_delivered", at: new Date().toISOString() },
+      );
+      this.messagesGateway.emitToContract(contract.id, "newMessage", {
+        ...sys,
+        sender: { id: 0, fullName: "System" },
+      });
+    } catch (e) {
+      this.logger.warn(
+        `markDelivered chat bubble failed: ${(e as Error).message}`,
+      );
+    }
+    // Notification to the buyer.
+    const buyerId = this.getBuyerId(contract);
+    if (buyerId) {
+      await this.notificationsService
+        .create(
+          buyerId,
+          "Ijrochi ishni yakunladi — ko'rib chiqing",
+          `#ESC-${contract.id} "${contract.title}" — ijrochi ishni topshirgan. Tekshirib "Mablag'ni yechish" tugmasini bosing yoki muammo bo'lsa nizo oching.`,
+          "work_delivered",
+          contract.id.toString(),
+        )
+        .catch(() => undefined);
+    }
+    return { ok: true };
+  }
+
+  /**
    * Pick the admin to take lead on a fresh dispute. Round-robin by current
    * active assignments: admin with the fewest in-flight DISPUTED contracts
    * wins; ties broken by user id for determinism. Returns null when no
@@ -572,16 +708,28 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
 
       const savedContract = await this.contractRepo.save(contract);
 
-      // Trigger Notifications
-      const targetUserId = (user.userId === savedContract.creatorId) ? savedContract.executorId : savedContract.creatorId;
+      // Trigger notifications targeted at the OTHER party with a concrete
+      // call-to-action per status. The generic "Shartnoma holati o'zgardi"
+      // text used to leave users staring at the screen — now they get a
+      // sentence telling them exactly what to do next (pay, release,
+      // attach card, etc.).
+      const targetUserId =
+        user.userId === savedContract.creatorId
+          ? savedContract.executorId
+          : savedContract.creatorId;
       if (targetUserId) {
+        const notif = this.statusChangeNotification(
+          status,
+          savedContract,
+          this.isBuyerActing(savedContract, { userId: targetUserId } as any),
+        );
         await this.notificationsService.create(
           targetUserId,
-          "Shartnoma holati o'zgardi",
-          `#ESC-${savedContract.id} shartnomasi "${status}" holatiga o'tkazildi.`,
-          "contract_update",
-          savedContract.id.toString()
-        );
+          notif.title,
+          notif.message,
+          notif.type,
+          savedContract.id.toString(),
+        ).catch(() => undefined);
       }
 
       // Auto-escalation: when a contract enters DISPUTED, page every admin

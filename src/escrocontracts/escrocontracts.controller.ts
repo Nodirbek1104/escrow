@@ -177,6 +177,13 @@ export class EscrocontractsController {
     return this.escrowService.cancel(id, req.user);
   }
 
+  // 8b. EXECUTOR: signal work delivery (no status change — just notify buyer)
+  @UseGuards(JwtAuthGuard)
+  @Post(':id/mark-delivered')
+  async markDelivered(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+    return this.escrowService.markDelivered(id, req.user);
+  }
+
   // 10. ADMIN: retry a failed payout (after auto-flow charged but a2c failed)
   @UseGuards(JwtAuthGuard, AdminGuard)
   @Post(':id/retry-payout')
