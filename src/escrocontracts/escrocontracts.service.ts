@@ -30,6 +30,18 @@ import { error } from 'console';
 
 const INVITE_TTL = 60 * 60 * 24; // 24 soat
 const FRONTEND_URL = process.env.FRONTEND_URL ?? 'http://localhost:3000';
+// Telegram Mini App deep link base. SMS / chat push / notification links
+// point here so the recipient opens the Mini App inside Telegram (with
+// their session) rather than a fresh web page.
+// Smart-link host. Invite SMS links and chat-push links point at
+// /r/contract/:id or /r/invite/:token under this host. Android App Links
+// intercept and open the mobile app; otherwise the backend HTML bridge
+// redirects to the Telegram Mini App.
+const SMART_LINK_HOST = process.env.FRONTEND_URL ?? 'https://aws-dev.escro.uz';
+
+function smartInviteLink(token: string): string {
+  return `${SMART_LINK_HOST}/r/invite/${encodeURIComponent(token)}`;
+}
 
 @Injectable()
 export class EscrocontractsService {
@@ -449,7 +461,11 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
         title: dto.title,
         amount: dto.amount,
         deadline: dto.deadline,
-        executorPhoneNumber: dto.executorPhoneNumber,
+        // Telefon raqamini normalize qilib saqlaymiz (BUG-L19/A19). Avval
+        // raw shaklda saqlanardi va keyingi inbox/dispute lookup'lari raw
+        // string === normalized format taqqoslagani sababli — invitee
+        // shartnomani ko'rmasligi mumkin edi.
+        executorPhoneNumber: this.normalizePhone(dto.executorPhoneNumber),
         commissionAmount,
         technicalTermsFile: filePath,
         status: EscrowStatus.PENDING,
@@ -470,7 +486,10 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
         dto.executorPhoneNumber,
         inviterName,
       );
-      const inviteLink = `${FRONTEND_URL}/invite/${token}`;
+      // SMS uchun smart link — Android'da mobile app installed bo'lsa
+    // app ochiladi, aks holda backend HTML bridge orqali Telegram Mini App
+    // ochiladi (web-app `/invite/<token>` route'ga otadi).
+    const inviteLink = smartInviteLink(token);
 
       // Notify creator (Success)
       await this.notificationsService.create(
@@ -562,6 +581,16 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
     user: any,
     data?: { reason?: string; cardId?: string },
   ) {
+    // BUG-L09 race himoyasi: ikkita admin yoki ikkita tomon (creator +
+    // executor) bir vaqtda updateStatus chaqirsa, ikkalasi ham `findOne`
+    // bir xil holatni ko'rib FSM check'dan o'tib, har biri o'z side-effect
+    // (hold, charge, payout, notify) bajaradi. Advisory lock har shartnoma
+    // bo'yicha bu blok ichida ketma-ketlikni ta'minlaydi.
+    const lockKey = Number(id) || 0;
+    await this.contractRepo.query('SELECT pg_advisory_lock($1, $2)', [
+      2000002,
+      lockKey,
+    ]);
     try {
       const contract = await this.findOne(id, user);
 
@@ -748,16 +777,24 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
 
       const savedContract = await this.contractRepo.save(contract);
 
-      // Trigger notifications targeted at the OTHER party with a concrete
-      // call-to-action per status. The generic "Shartnoma holati o'zgardi"
-      // text used to leave users staring at the screen — now they get a
-      // sentence telling them exactly what to do next (pay, release,
-      // attach card, etc.).
-      const targetUserId =
-        user.userId === savedContract.creatorId
-          ? savedContract.executorId
-          : savedContract.creatorId;
-      if (targetUserId) {
+      // Trigger notifications targeted at the OTHER party (or BOTH
+      // parties when an admin acts — BUG-L05). Avval admin harakatlarda
+      // `targetUserId = creatorId` (admin != creator) edi, executor
+      // hech qachon xabar olmasdi. Endi actor'dan tashqari barcha
+      // ishtirokchilar xabardor qilinadi.
+      const isAdminActor =
+        user.role === 'admin' || user.role === 'super_admin';
+      const candidateIds = isAdminActor
+        ? [savedContract.creatorId, savedContract.executorId]
+        : [
+            user.userId === savedContract.creatorId
+              ? savedContract.executorId
+              : savedContract.creatorId,
+          ];
+      const targets = candidateIds.filter(
+        (uid) => uid != null && uid !== user.userId,
+      ) as number[];
+      for (const targetUserId of targets) {
         const notif = this.statusChangeNotification(
           status,
           savedContract,
@@ -794,6 +831,17 @@ private isInviteeByPhone(c: EscrowContract, user: any): boolean {
     } catch (error) {
       this.logger.error(`UpdateStatus Error: ${error}`);
       throw error;
+    } finally {
+      try {
+        await this.contractRepo.query('SELECT pg_advisory_unlock($1, $2)', [
+          2000002,
+          lockKey,
+        ]);
+      } catch (e) {
+        this.logger.warn(
+          `updateStatus: pg_advisory_unlock failed: ${(e as Error).message}`,
+        );
+      }
     }
   }
   async findOne(id: number, user: any): Promise<EscrowContract> {
@@ -1012,9 +1060,13 @@ private normalizePhone(phone: string | null | undefined): string {
       // Hold mavjud bo'lsa, avval Paylov tomonida dismiss qilamiz; muvaffaqiyatsiz
       // bo'lsa kontrakt statusi o'zgarmaydi — pul Paylov'da muzlatilgan holicha
       // qoladi va admin qo'lda hal qilishi mumkin.
+      // BUG-L04 fix: REVISION holatdagi pul ham hali Paylov'da muzlatilgan
+      // (revision = ish qaytarish, hold dismiss qilinmagan). Avval bu list
+      // da yo'q edi va REVISION cancel pulni 28 kun bloklab qoldirardi.
       const heldStates = [
         EscrowStatus.PAYMENT_HELD,
         EscrowStatus.ACTIVE,
+        EscrowStatus.REVISION,
         EscrowStatus.DISPUTED,
       ];
       if (heldStates.includes(contract.status) && contract.transactionId) {
@@ -1075,7 +1127,10 @@ private normalizePhone(phone: string | null | undefined): string {
       JSON.stringify({ contractId: contract.id, phone }),
     );
 
-    const inviteLink = `${FRONTEND_URL}/invite/${token}`;
+    // SMS uchun smart link — Android'da mobile app installed bo'lsa
+    // app ochiladi, aks holda backend HTML bridge orqali Telegram Mini App
+    // ochiladi (web-app `/invite/<token>` route'ga otadi).
+    const inviteLink = smartInviteLink(token);
     // Eskiz tasdiqlagan template format: "ESCRO: {ism} sizni
     // #{id}-bitimga taklif qildi: {link}". Variable substitution
     // moderation paytida ko'rsatilgan misol shaklida (777 va abc123)
@@ -1160,15 +1215,83 @@ private normalizePhone(phone: string | null | undefined): string {
     }
   }
 
-  async findAllByUser(user: any) {
-    return this.contractRepo.find({
-      where: [
-        { creatorId: user.userId },
-        { executorPhoneNumber: user.phoneNumber },
-      ],
-      relations: ['creator', 'executor', 'assignedAdmin'],
-      order: { createdAt: 'DESC' },
-    });
+  /**
+   * List the user's contracts for the dashboard / history.
+   *
+   * Slim response: drops admin/kyc/tokenVersion/otp fields that the list view
+   * never uses (was ~3 KB per row → now ~400 B). Full data is still available
+   * on the contract detail endpoint when actually needed.
+   *
+   * Supports cursor-based pagination via `?before=<id>&limit=N` (default 50).
+   */
+  async findAllByUser(
+    user: any,
+    opts?: { before?: number; limit?: number; status?: string },
+  ) {
+    const limit = Math.min(Math.max(opts?.limit ?? 50, 1), 100);
+    const qb = this.contractRepo
+      .createQueryBuilder('c')
+      .leftJoin('c.creator', 'creator')
+      .addSelect([
+        'creator.id',
+        'creator.fullName',
+        'creator.phoneNumber',
+      ])
+      .leftJoin('c.executor', 'executor')
+      .addSelect([
+        'executor.id',
+        'executor.fullName',
+        'executor.phoneNumber',
+      ])
+      .where('(c.creatorId = :uid OR c.executorPhoneNumber = :phone)', {
+        uid: user.userId,
+        phone: user.phoneNumber,
+      })
+      .orderBy('c.id', 'DESC')
+      .take(limit);
+
+    if (opts?.before && opts.before > 0) {
+      qb.andWhere('c.id < :before', { before: opts.before });
+    }
+    if (opts?.status) {
+      qb.andWhere('c.status = :status', { status: opts.status });
+    }
+
+    const rows = await qb.getMany();
+    // Strip server-side detail fields the list view doesn't need.
+    return rows.map((c) => ({
+      id: c.id,
+      title: c.title,
+      amount: Number(c.amount),
+      commissionAmount: Number(c.commissionAmount ?? 0),
+      status: c.status,
+      contractType: c.contractType,
+      executorPhoneNumber: c.executorPhoneNumber,
+      creatorId: c.creatorId,
+      executorId: c.executorId ?? null,
+      deadline: c.deadline,
+      createdAt: c.createdAt,
+      acceptedAt: c.acceptedAt ?? null,
+      paidAt: c.paidAt ?? null,
+      completedAt: c.completedAt ?? null,
+      cancelledAt: c.cancelledAt ?? null,
+      disputedAt: c.disputedAt ?? null,
+      rejectionReason: c.rejectionReason ?? null,
+      creator: c.creator
+        ? {
+            id: c.creator.id,
+            fullName: c.creator.fullName,
+            phoneNumber: c.creator.phoneNumber,
+          }
+        : null,
+      executor: c.executor
+        ? {
+            id: c.executor.id,
+            fullName: c.executor.fullName,
+            phoneNumber: c.executor.phoneNumber,
+          }
+        : null,
+    }));
   }
 
   async findAllAdmin() {
@@ -1310,27 +1433,36 @@ private normalizePhone(phone: string | null | undefined): string {
       )
       .getMany();
 
-    type Bucket = { date: string; spent: number; earned: number };
+    // Escrow-native KPIs (not income/expense): the budget tied up in
+    // successful (completed) deals, the budget locked in open disputes, and
+    // the funds currently frozen (payment_held / active). Each daily bucket
+    // groups by the contract's createdAt so the detail screen can chart them.
+    type Bucket = {
+      date: string;
+      successful: number;
+      disputed: number;
+      frozen: number;
+    };
     const buckets = new Map<string, Bucket>();
     for (let i = 0; i < span; i++) {
       const d = new Date(since);
       d.setUTCDate(since.getUTCDate() + i);
       const key = d.toISOString().slice(0, 10);
-      buckets.set(key, { date: key, spent: 0, earned: 0 });
+      buckets.set(key, { date: key, successful: 0, disputed: 0, frozen: 0 });
     }
 
-    let totalSpent = 0;
-    let totalEarned = 0;
-    let totalHeld = 0;
+    let successfulBudget = 0;
+    let disputedBudget = 0;
+    let frozenBudget = 0;
     let totalCommissionPaid = 0;
-    let activeCount = 0;
-    let completedCount = 0;
+    let successfulCount = 0;
+    let disputedCount = 0;
+    let frozenCount = 0;
     let cancelledCount = 0;
 
-    const heldStatuses = new Set([
+    const frozenStatuses = new Set([
       EscrowStatus.PAYMENT_HELD,
       EscrowStatus.ACTIVE,
-      EscrowStatus.DISPUTED,
     ]);
 
     for (const c of candidates) {
@@ -1340,27 +1472,22 @@ private normalizePhone(phone: string | null | undefined): string {
 
       const amt = Number(c.amount ?? 0);
       const com = Number(c.commissionAmount ?? 0);
-      const createdKey = new Date(c.createdAt)
-        .toISOString()
-        .slice(0, 10);
+      const createdKey = new Date(c.createdAt).toISOString().slice(0, 10);
+      const b = buckets.get(createdKey);
 
-      // Live held funds (only the buyer's money is at risk)
-      if (heldStatuses.has(c.status)) {
-        if (isBuyer) totalHeld += amt + com;
-        activeCount++;
+      if (c.status === EscrowStatus.DISPUTED) {
+        disputedBudget += amt;
+        disputedCount++;
+        if (b) b.disputed += amt;
+      } else if (frozenStatuses.has(c.status)) {
+        frozenBudget += amt;
+        frozenCount++;
+        if (b) b.frozen += amt;
       } else if (c.status === EscrowStatus.COMPLETED) {
-        completedCount++;
-        if (isBuyer) {
-          totalSpent += amt + com;
-          totalCommissionPaid += com;
-          const b = buckets.get(createdKey);
-          if (b) b.spent += amt + com;
-        }
-        if (isExecutor) {
-          totalEarned += amt;
-          const b = buckets.get(createdKey);
-          if (b) b.earned += amt;
-        }
+        successfulBudget += amt;
+        successfulCount++;
+        if (isBuyer) totalCommissionPaid += com;
+        if (b) b.successful += amt;
       } else if (c.status === EscrowStatus.CANCELLED) {
         cancelledCount++;
       }
@@ -1372,13 +1499,21 @@ private normalizePhone(phone: string | null | undefined): string {
       to: new Date().toISOString().slice(0, 10),
       series: Array.from(buckets.values()),
       totals: {
-        spent: totalSpent,
-        earned: totalEarned,
-        held: totalHeld,
+        successfulBudget,
+        disputedBudget,
+        frozen: frozenBudget,
         commissionPaid: totalCommissionPaid,
-        active: activeCount,
-        completed: completedCount,
-        cancelled: cancelledCount,
+        successfulCount,
+        disputedCount,
+        frozenCount,
+        cancelledCount,
+        // Backward-compat aliases for already-released clients (mobile v1.0.16
+        // reads earned/spent/held). Safe to drop once everyone is on the new
+        // build. Mapped to the closest new semantics.
+        earned: successfulBudget,
+        spent: disputedBudget,
+        held: frozenBudget,
+        completed: successfulCount,
       },
     };
   }
@@ -1471,7 +1606,17 @@ private normalizePhone(phone: string | null | undefined): string {
     };
   }
   // ─── UPDATE METODI ─────────────────────────────────────────────────────────
-async update(id: number, dto: any, user: any, filePath?: string) {
+async update(
+  id: number,
+  dto: {
+    title?: string;
+    description?: string;
+    deadline?: string;
+    executorPhoneNumber?: string;
+  },
+  user: any,
+  filePath?: string,
+) {
   try {
     // Avval shartnomani topamiz va ruxsatni tekshiramiz
     const contract = await this.findOne(id, user);
@@ -1486,8 +1631,27 @@ async update(id: number, dto: any, user: any, filePath?: string) {
       throw new BadRequestException('Faqat kutilayotgan (PENDING) shartnomalarni tahrirlash mumkin');
     }
 
-    // DTO dagi ma'lumotlarni contract obyektiga o'tkazamiz
-    Object.assign(contract, dto);
+    // ⚠ Avval `Object.assign(contract, dto)` qilinardi — bu har qanday
+    // kolonkani (jumladan `status`, `amount`, `commissionAmount`,
+    // `creatorId`, `executorId`, `transactionId`, `receiverCardId`) yozish
+    // imkonini berardi (BUG-S06: mass assignment + FSM bypass). Endi har
+    // bir maydonni alohida nazorat qilamiz.
+    if (dto.title !== undefined) contract.title = dto.title.trim();
+    // EscrowContract entity'da `description` ustuni yo'q — DTO da qabul
+    // qilgan bo'lsak ham e'tiborga olmaymiz (mass assignment himoyasi).
+    if (dto.deadline !== undefined) {
+      // `deadline` epoch sekundlarda (number) saqlanadi. DTO ISO string
+      // qabul qiladi — sekundga aylantiramiz.
+      const d = new Date(dto.deadline);
+      if (!isNaN(d.getTime()) && d.getTime() > Date.now()) {
+        contract.deadline = Math.floor(d.getTime() / 1000);
+      }
+    }
+    if (dto.executorPhoneNumber !== undefined) {
+      // executorPhoneNumber normalize qilib saqlaymiz (BUG-A15/A19) — keyin
+      // invitee inbox lookup to'g'ri ishlashi uchun.
+      contract.executorPhoneNumber = this.normalizePhone(dto.executorPhoneNumber);
+    }
 
     // Agar yangi fayl yuklangan bo'lsa, uni yangilaymiz
     if (filePath) {
