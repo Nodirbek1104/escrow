@@ -5,18 +5,22 @@ import { MessagesGateway } from './messages.gateway';
 
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Message } from './entities/message.entity';
+import { ChatRead } from './entities/chat-read.entity';
+import { EscrowContract } from '../escrocontracts/entities/escrocontract.entity';
+import { User } from '../user/entities/user.entity';
+import { ChatPresenceService } from './chat-presence.service';
 import { JwtModule } from '@nestjs/jwt';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Message]),
+    TypeOrmModule.forFeature([Message, ChatRead, EscrowContract, User]),
     JwtModule.register({
       secret: process.env.JWT_SECRET || 'secret',
       signOptions: { expiresIn: '1d' },
     }),
   ],
-  providers: [MessagesService, MessagesGateway],
+  providers: [MessagesService, MessagesGateway, ChatPresenceService],
   controllers: [MessagesController],
-  exports: [MessagesService],
+  exports: [MessagesService, MessagesGateway],
 })
 export class MessagesModule {}

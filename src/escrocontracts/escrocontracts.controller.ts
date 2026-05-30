@@ -6,16 +6,20 @@ import {
   Patch,
   Param,
   Delete,
+  Query,
+  Res,
   UseGuards,
   Req,
   UploadedFile,
   UseInterceptors,
   ParseIntPipe,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { EscrocontractsService } from './escrocontracts.service';
 import { CreateEscrowContractDto } from './dto/create-escrocontract.dto';
 import { EscrowStatus } from './entities/escrocontract.entity';
+import { SettingsService } from '../settings/settings.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
@@ -25,7 +29,10 @@ import { AdminGuard } from '../auth/guards/admin.guard';
 @Controller('escrow-contracts')
 @UseInterceptors(AuditInterceptor)
 export class EscrocontractsController {
-  constructor(private readonly escrowService: EscrocontractsService) {}
+  constructor(
+    private readonly escrowService: EscrocontractsService,
+    private readonly settings: SettingsService,
+  ) {}
 
   // 1. CREATE
   @UseGuards(JwtAuthGuard)
@@ -54,6 +61,12 @@ export class EscrocontractsController {
   @Get('my-contracts')
   async findAll(@Req() req: any) {
     return this.escrowService.findAllByUser(req.user);
+  }
+
+  // Public: live platform commission percent (used by wizard preview).
+  @Get('commission-rate')
+  getCommissionRate() {
+    return { percent: this.settings.getCommissionPercent() };
   }
 
   // 3. INVITE RESOLVE
@@ -104,6 +117,52 @@ export class EscrocontractsController {
     return this.escrowService.findAllAdmin();
   }
 
+  // 6b. PERSONAL ANALYTICS (web-app dashboard)
+  @UseGuards(JwtAuthGuard)
+  @Get('me/analytics')
+  async myAnalytics(@Req() req: any, @Query('days') daysRaw?: string) {
+    const days = daysRaw ? Number(daysRaw) : 30;
+    return this.escrowService.getMyAnalytics(req.user, days);
+  }
+
+  // 9b. ADMIN: FINANCE SUMMARY (held liability, commission, status counts)
+  @Get('admin/finance-summary')
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  async financeSummary() {
+    return this.escrowService.getFinanceSummary();
+  }
+
+  // 9b2. ADMIN: REVENUE ANALYTICS (daily series, last N days)
+  @Get('admin/analytics')
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  async analytics(@Query('days') daysRaw?: string) {
+    const days = daysRaw ? Number(daysRaw) : 30;
+    return this.escrowService.getRevenueAnalytics(days);
+  }
+
+  // 9c. ADMIN: contracts CSV export (optional from / to / status filters)
+  @Get('admin/export.csv')
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  async exportContractsCsv(
+    @Res() res: Response,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('status') status?: string,
+  ) {
+    const csv = await this.escrowService.exportContractsCsv({
+      from,
+      to,
+      status,
+    });
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="escro-contracts-${stamp}.csv"`,
+    );
+    res.send(csv);
+  }
+
   // 7. FIND ONE (Dinamik :id oxirida bo'lishi xavfsizroq)
   @UseGuards(JwtAuthGuard)
   @Get(':id')
@@ -116,5 +175,19 @@ export class EscrocontractsController {
   @Delete(':id/cancel')
   async cancel(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
     return this.escrowService.cancel(id, req.user);
+  }
+
+  // 8b. EXECUTOR: signal work delivery (no status change — just notify buyer)
+  @UseGuards(JwtAuthGuard)
+  @Post(':id/mark-delivered')
+  async markDelivered(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+    return this.escrowService.markDelivered(id, req.user);
+  }
+
+  // 10. ADMIN: retry a failed payout (after auto-flow charged but a2c failed)
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  @Post(':id/retry-payout')
+  async retryPayout(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+    return this.escrowService.retryPayout(id, req.user);
   }
 }

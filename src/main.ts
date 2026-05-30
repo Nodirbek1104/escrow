@@ -5,11 +5,12 @@ import { AuditInterceptor } from './audit-log/audit-log.interceptor'; // Yo'lni 
 import { AuditLogService } from './audit-log/audit-log.service';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import * as dotenv from 'dotenv';
+import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
 
 dotenv.config();
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { rawBody: true });
 
   // 1. ValidationPipe
   app.useGlobalPipes(new ValidationPipe({
@@ -17,6 +18,11 @@ async function bootstrap() {
     forbidNonWhitelisted: true,
     transform: true
   }));
+
+  // 2. Global exception filter — sanitises every error so neither DB
+  //    internals nor stack traces ever reach a client. See
+  //    common/filters/global-exception.filter.ts.
+  app.useGlobalFilters(new GlobalExceptionFilter());
 
   app.setGlobalPrefix('api');
   app.enableCors({

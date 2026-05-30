@@ -1,6 +1,8 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
 import { User } from '../../user/entities/user.entity';
 import { EscrowContract } from '../../escrocontracts/entities/escrocontract.entity';
+
+export type MessageType = 'user' | 'system';
 
 @Entity()
 export class Message {
@@ -13,17 +15,67 @@ export class Message {
   @Column({ nullable: true })
   fileUrl: string;
 
+  /** Quoted message id; loaded lazily so list query joins it cheaply. */
+  @Column({ type: 'integer', nullable: true })
+  replyToId?: number | null;
+
+  @ManyToOne(() => Message, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'replyToId' })
+  replyTo?: Message | null;
+
+  /** Set when the sender edits this message; FE shows "(tahrirlandi)". */
+  @Column({ type: 'timestamp', nullable: true })
+  editedAt?: Date | null;
+
+  /** Soft-delete: row stays for audit, content is wiped on delete. */
+  @Column({ type: 'timestamp', nullable: true })
+  deletedAt?: Date | null;
+
+  /**
+   * 'user' = a real participant message (default)
+   * 'system' = auto-generated note about a status change
+   *   Rendered centered with no avatar; senderId may be 0/null.
+   */
+  @Column({ type: 'varchar', default: 'user' })
+  type!: MessageType;
+
+  /** For system messages: { kind: 'status_change', from, to, contractId, ... } */
+  @Column({ type: 'jsonb', nullable: true })
+  systemPayload?: Record<string, any> | null;
+
+  /**
+   * Forward provenance — set when this message was forwarded from another
+   * chat. Stored as a frozen snapshot of the source so we can render
+   * "Forwarded from X" even if the original sender renames, leaves the
+   * contract, or the source is deleted. Null for non-forwarded messages.
+   */
+  @Column({ type: 'jsonb', nullable: true })
+  forwardedFrom?: {
+    originalMessageId: number;
+    sourceContractId: number;
+    sourceContractTitle: string | null;
+    senderId: number | null;
+    senderName: string | null;
+  } | null;
+
   @ManyToOne(() => EscrowContract, (contract) => contract.id)
   contract: EscrowContract;
 
   @Column()
   contractId: number;
 
-  @ManyToOne(() => User)
-  sender: User;
+  @ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'senderId' })
+  sender!: User | null;
 
-  @Column()
-  senderId: number;
+  /**
+   * Real participant's user id, or NULL for system-generated bubbles
+   * (status changes, dispute announcements). Storing `0` here used to
+   * violate the FK constraint to "user.id" — Postgres rejected every
+   * system message and the entire status-transition flow downstream.
+   */
+  @Column({ type: 'integer', nullable: true })
+  senderId!: number | null;
 
   @CreateDateColumn()
   createdAt: Date;

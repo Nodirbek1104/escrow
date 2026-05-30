@@ -4,6 +4,18 @@ import {
 } from 'typeorm';
 import { User } from '../../user/entities/user.entity';
 
+/**
+ * Shartnoma turi — bazada faqat ikki tomon (xaridor va ijrochi) bo'ladi,
+ * lekin contract_type qaysi tomondan boshlanganligini ko'rsatadi. Buni
+ * tushuncha sifatida olish: "buyer_initiated" = xaridor o'z taklifini
+ * yaratdi va ijrochini taklif qildi; "executor_initiated" = ijrochi
+ * "Offer" ko'rinishida xizmat e'lon qildi va xaridor (mijoz) qabul qiladi.
+ */
+export enum ContractType {
+  BUYER_INITIATED = 'buyer_initiated',
+  EXECUTOR_INITIATED = 'executor_initiated',
+}
+
 export enum EscrowStatus {
   DRAFT     = 'draft',
   PENDING   = 'pending', // Yaratildi, ijrochi tasdiqlashini kutmoqda
@@ -35,6 +47,22 @@ export class EscrowContract {
   })
   amount!: number;
 
+  /**
+   * Platform fee, frozen at create time so future percentage changes do not
+   * retroactively rewrite older contracts. Buyer is charged
+   * `amount + commissionAmount`; executor receives `amount`.
+   */
+  @Column('decimal', {
+    precision: 12,
+    scale: 2,
+    default: 0,
+    transformer: {
+      to: (value: number) => value ?? 0,
+      from: (value: string) => parseFloat(value ?? '0'),
+    },
+  })
+  commissionAmount!: number;
+
   // --- To'lov bilan bog'liq yangi maydonlar ---
 
   @Column({ nullable: true })
@@ -48,6 +76,59 @@ export class EscrowContract {
 
   @Column({ nullable: true })
   executorId?: number;
+
+  /** Pinned message id for the contract chat (Telegram-style sticky). */
+  @Column({ type: 'integer', nullable: true })
+  pinnedMessageId?: number | null;
+
+  /**
+   * Admin user assigned to handle this contract's dispute. Set when the
+   * contract first enters DISPUTED (round-robin by current dispute load).
+   * Stays set after resolution so we can audit who handled what.
+   */
+  @Column({ type: 'integer', nullable: true })
+  assignedAdminId?: number | null;
+
+  @ManyToOne(() => User, { nullable: true })
+  @JoinColumn({ name: 'assignedAdminId' })
+  assignedAdmin?: User | null;
+
+  /**
+   * Timestamp of the last "deadline overdue" SLA notification we sent for
+   * this contract. Used to make the SLA cron one-shot per contract so
+   * participants aren't pinged every hour. Null = never warned.
+   */
+  @Column({ type: 'timestamp', nullable: true })
+  slaWarnedAt?: Date | null;
+
+  // ─── Audit timestamps ──────────────────────────────────────────────────
+  // Each status transition stamps the corresponding column. Lets us audit
+  // "when was this paid", "when was work delivered", show SLA progress on
+  // the FE, and answer analytics questions without trawling the
+  // payment_transactions log.
+
+  @Column({ type: 'timestamp', nullable: true })
+  acceptedAt?: Date | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  paidAt?: Date | null;
+
+  /** Set when the executor presses "Ishni topshirish". Also serves as the
+   *  cooldown / single-fire guard so they can't spam the buyer. */
+  @Column({ type: 'timestamp', nullable: true })
+  workDeliveredAt?: Date | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  completedAt?: Date | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  rejectedAt?: Date | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  disputedAt?: Date | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  cancelledAt?: Date | null;
   // --------------------------------------------
 
   @Column({ nullable: true })
@@ -62,6 +143,20 @@ export class EscrowContract {
   @Column({ type: 'enum', enum: EscrowStatus, default: EscrowStatus.PENDING })
   status!: EscrowStatus;
 
+  /**
+   * Shartnoma qaysi tomondan boshlanganini ko'rsatadi. Ishtirokchilar
+   * ro'yxati har doim ikki tomon: xaridor (buyer) va ijrochi (executor) —
+   * contract_type esa shu jufdan qaysi biri boshlovchi rolida ekanini
+   * aytadi. Bu pul oqimini emas, faqat UI/UX dispatchini boshqaradi
+   * (charge / payout / cancel logikasi har ikkala holatda bir xil).
+   */
+  @Column({
+    type: 'varchar',
+    length: 32,
+    default: ContractType.BUYER_INITIATED,
+  })
+  contractType!: ContractType;
+
   @Column()
   executorPhoneNumber!: string;
 
@@ -74,6 +169,9 @@ export class EscrowContract {
   @ManyToOne(() => User, (user) => user.id)
   @JoinColumn({ name: 'creatorId' })
   creator!: User;
+  @ManyToOne(() => User, { nullable: true })
+  @JoinColumn({ name: 'executorId' })
+  executor?: User;
 
   @Column()
   creatorId!: number; // Creatorning IDsi (oson kirish uchun)

@@ -1,15 +1,198 @@
-import { Controller, Get, Param, UseGuards, ParseIntPipe, Req } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  DefaultValuePipe,
+  Delete,
+  Get,
+  Param,
+  ParseIntPipe,
+  Post,
+  Query,
+  Req,
+  Res,
+  UploadedFile,
+  UseGuards,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { diskStorage } from 'multer';
+import { extname, join } from 'path';
+import { existsSync } from 'fs';
+import type { Response } from 'express';
 import { MessagesService } from './messages.service';
+import { MessagesGateway } from './messages.gateway';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { TelegramGuard } from '../auth/guards/telegram.guard';
 
+const MESSAGES_UPLOAD_DIR = join(process.cwd(), 'uploads', 'messages');
+
 @Controller('messages')
-@UseGuards(JwtAuthGuard, TelegramGuard)
 export class MessagesController {
-  constructor(private readonly messagesService: MessagesService) {}
+  constructor(
+    private readonly messagesService: MessagesService,
+    private readonly gateway: MessagesGateway,
+  ) {}
+
+  /**
+   * Inbox: every contract the user participates in + last message +
+   * unread count. Pass `?archived=true` for the archive bin view.
+   */
+  @Get('inbox')
+  @UseGuards(JwtAuthGuard, TelegramGuard)
+  async getInbox(
+    @Req() req: any,
+    @Query('archived') archived?: string,
+  ) {
+    return this.messagesService.getInbox(req.user, {
+      archivedOnly: archived === 'true' || archived === '1',
+    });
+  }
+
+  /** Archive or un-archive a contract chat for the current user. */
+  @Post('contract/:id/archive')
+  @UseGuards(JwtAuthGuard, TelegramGuard)
+  async archive(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
+    return this.messagesService.setArchived(req.user.userId, id, true);
+  }
+
+  @Delete('contract/:id/archive')
+  @UseGuards(JwtAuthGuard, TelegramGuard)
+  async unarchive(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
+    return this.messagesService.setArchived(req.user.userId, id, false);
+  }
+
+  /**
+   * Forward a message from one contract chat into another. Sender must be
+   * a participant in both contracts; service throws 404 otherwise.
+   */
+  @Post('forward')
+  @UseGuards(JwtAuthGuard, TelegramGuard)
+  async forward(
+    @Req() req: any,
+    @Body() body: { messageId: number; targetContractId: number },
+  ) {
+    if (!body?.messageId || !body?.targetContractId) {
+      throw new BadRequestException('messageId va targetContractId majburiy');
+    }
+    const forwarded = await this.messagesService.forwardMessage({
+      sourceMessageId: body.messageId,
+      targetContractId: body.targetContractId,
+      user: req.user,
+    });
+    // Push to the target chat socket room so participants get an
+    // instant update without polling.
+    this.gateway.emitToContract(
+      body.targetContractId,
+      'newMessage',
+      forwarded,
+    );
+    return forwarded;
+  }
+
+  /** Sum of unread across all of the user's contracts (for a global badge). */
+  @Get('inbox/unread-count')
+  @UseGuards(JwtAuthGuard, TelegramGuard)
+  async getTotalUnread(@Req() req: any) {
+    return { total: await this.messagesService.getTotalUnread(req.user) };
+  }
 
   @Get('contract/:id')
-  async getByContract(@Param('id', ParseIntPipe) id: number) {
-    return this.messagesService.findByContract(id);
+  @UseGuards(JwtAuthGuard, TelegramGuard)
+  async getByContract(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Query('before', new DefaultValuePipe(0), ParseIntPipe) before: number,
+    @Query('limit', new DefaultValuePipe(50), ParseIntPipe) limit: number,
+  ) {
+    return this.messagesService.findByContract(id, req.user?.userId, {
+      before: before > 0 ? before : undefined,
+      limit,
+    });
+  }
+
+  /** Mark all messages in this contract as read for the current user. */
+  @Post('contract/:id/read')
+  @UseGuards(JwtAuthGuard, TelegramGuard)
+  async markRead(@Req() req: any, @Param('id', ParseIntPipe) id: number) {
+    return this.messagesService.markRead(req.user.userId, id);
+  }
+
+  /** Pin a specific message at the top of the contract chat. */
+  @Post('contract/:id/pin/:messageId')
+  @UseGuards(JwtAuthGuard, TelegramGuard)
+  async pinMessage(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('messageId', ParseIntPipe) messageId: number,
+  ) {
+    return this.messagesService.pinMessage(id, messageId, req.user);
+  }
+
+  /** Clear the pinned message for the contract chat. */
+  @Delete('contract/:id/pin')
+  @UseGuards(JwtAuthGuard, TelegramGuard)
+  async unpinMessage(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
+    return this.messagesService.unpinMessage(id, req.user);
+  }
+
+  /** Upload a single file (image or PDF) for a chat. Returns a URL to be
+   *  passed back into sendMessage as fileUrl. */
+  @Post('upload')
+  @UseGuards(JwtAuthGuard, TelegramGuard)
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: diskStorage({
+        destination: MESSAGES_UPLOAD_DIR,
+        filename: (_req, file, cb) => {
+          const unique =
+            Date.now().toString(36) +
+            '-' +
+            Math.random().toString(36).slice(2, 10);
+          cb(null, `${unique}${extname(file.originalname).toLowerCase()}`);
+        },
+      }),
+      limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+      fileFilter: (_req, file, cb) => {
+        const ok =
+          /^image\/(png|jpe?g|gif|webp|heic)$/i.test(file.mimetype) ||
+          file.mimetype === 'application/pdf';
+        if (!ok) return cb(new BadRequestException('Faqat rasm yoki PDF ruxsat etilgan'), false);
+        cb(null, true);
+      },
+    }),
+  )
+  uploadFile(@UploadedFile() file: Express.Multer.File) {
+    if (!file) throw new BadRequestException("Fayl yuklanmadi");
+    return {
+      url: `/api/messages/file/${file.filename}`,
+      fileName: file.originalname,
+      mimeType: file.mimetype,
+      size: file.size,
+    };
+  }
+
+  /** Stream a previously uploaded chat file. (Auth via JwtAuthGuard.) */
+  @Get('file/:fname')
+  serveFile(@Param('fname') fname: string, @Res() res: Response) {
+    // basic traversal guard
+    if (fname.includes('/') || fname.includes('..')) {
+      throw new BadRequestException('Fayl nomi noto‘g‘ri');
+    }
+    const fp = join(MESSAGES_UPLOAD_DIR, fname);
+    if (!existsSync(fp)) {
+      res.status(404).json({ message: 'Fayl topilmadi' });
+      return;
+    }
+    res.sendFile(fp);
   }
 }

@@ -18,6 +18,8 @@ import { APP_GUARD } from '@nestjs/core';
 import { TelegramGuard } from './auth/guards/telegram.guard';
 import { MessagesModule } from './messages/messages.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { SettingsModule } from './settings/settings.module';
+import { KycModule } from './kyc/kyc.module';
 
 dotenv.config();
 
@@ -27,15 +29,26 @@ dotenv.config();
       isGlobal: true, 
     }),
     ServeStaticModule.forRoot({
-      rootPath: process.env.NODE_ENV === 'production' 
-        ? '/home/ubuntu/escro-frontend/dist/client' 
+      rootPath: process.env.NODE_ENV === 'production'
+        ? '/home/ubuntu/escro-frontend/dist/client'
         : join(__dirname, '..', 'uploads'),
-      exclude: ['/api*'],
+      // Express 5 + path-to-regexp 8 naked '*'ni qabul qilmaydi
+      // (TypeError: Missing parameter name at index 5: /api*). Yangi
+      // syntax: named wildcard `{*splat}`. `/api` o'zi alohida
+      // ko'rsatiladi — `{*splat}` faqat /-dan keyingi bo'laklarni
+      // ushlaydi. Bu kombinatsiya naked /api dan /api/anything/here
+      // gacha hammasini static fallback'dan chiqarib turadi.
+      exclude: ['/api', '/api/{*splat}'],
     }),
-    ThrottlerModule.forRoot([{
-      ttl: 60000,
-      limit: 15,
-    }]),
+    // Single default throttler bucket. Per-route stricter limits are
+    // applied with `@Throttle({ default: { limit, ttl } })`. We
+    // intentionally avoid multiple named trackers here — when several
+    // are configured globally, every request is checked against ALL of
+    // them (so a 3/min "otp" tracker would 429 the 4th POST anywhere on
+    // the API, not just /send-otp).
+    ThrottlerModule.forRoot([
+      { name: 'default', ttl: 60_000, limit: 120 },
+    ]),
     RedisModule.forRoot({
       type: 'single',
       url: 'redis://localhost:6379'
@@ -56,6 +69,8 @@ dotenv.config();
     PaymentModule,
     MessagesModule,
     NotificationsModule,
+    SettingsModule,
+    KycModule,
   ],
   controllers: [AppController],
   providers: [

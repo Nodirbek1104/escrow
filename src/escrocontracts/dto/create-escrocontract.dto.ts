@@ -1,6 +1,15 @@
 // src/escrocontracts/dto/create-escrocontract.dto.ts
 import { Type } from 'class-transformer';
-import { IsNotEmpty, IsNumber, IsString, Min, Max } from 'class-validator';
+import {
+  IsEnum,
+  IsNotEmpty,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Min,
+  Max,
+} from 'class-validator';
+import { ContractType } from '../entities/escrocontract.entity';
 
 export class CreateEscrowContractDto {
   @IsString()
@@ -22,4 +31,16 @@ export class CreateEscrowContractDto {
   @IsNotEmpty()
   executorPhoneNumber!: string;
 
+  /** Shartnoma turi: `buyer_initiated` (xaridor taklif qiladi, ijrochini
+   *  chaqiradi) yoki `executor_initiated` (ijrochi "Offer" e'lon qiladi,
+   *  xaridor kelib to'laydi). Default — buyer_initiated. */
+  @IsOptional()
+  @IsEnum(ContractType)
+  contractType?: ContractType;
+
+  /** Required when creatorRole='executor': the executor's payout card,
+   *  pre-selected at creation time so the buyer just pays. */
+  @IsOptional()
+  @IsString()
+  receiverCardId?: string;
 }
