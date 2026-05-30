@@ -6,8 +6,8 @@ deploy_to_server:
   image: ubuntu:latest
   before_script:
     - 'which ssh-agent || ( apt-get update -y && apt-get install openssh-client -y )'
-    - eval \$(ssh-agent -s)
-    - echo "\$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
     - mkdir -p ~/.ssh
     - chmod 700 ~/.ssh
     - ssh-keyscan 16.170.64.168 >> ~/.ssh/known_hosts
