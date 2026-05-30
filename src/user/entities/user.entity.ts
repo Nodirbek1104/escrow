@@ -25,6 +25,15 @@ export class User {
   @Column({ default: false })
   isVerified!: boolean;
 
+  /**
+   * BUG-L16: Password reset / "log out everywhere" uchun. Har JWT
+   * payload'da `tokenVersion` saqlanadi va validate'da DB versiyasi bilan
+   * solishtiriladi. Reset paytida bu raqam +1, eski tokenlar darhol
+   * yaroqsiz bo'ladi.
+   */
+  @Column({ type: 'integer', default: 0 })
+  tokenVersion!: number;
+
   @Column({
     type: "enum",
     enum: UserRole,
@@ -61,6 +70,11 @@ export class User {
   @Column({ type: "integer", nullable: true })
   kycReviewedBy?: number | null;
 
+  // Profil rasmi — yuklangan avatarning serve URL'i (masalan
+  // `/auth/avatar/file/<name>.jpg`). Null = rasm yo'q (initiallar ko'rsatiladi).
+  @Column({ type: "varchar", nullable: true })
+  avatarUrl?: string | null;
+
   // --- RELATIONLAR ---
   
   @OneToMany(() => EscrowContract, (contract) => contract.creator)
@@ -72,4 +86,34 @@ export class User {
 
   @Column({ type: 'timestamp', default: () => 'CURRENT_TIMESTAMP' })
   createdAt!: Date;
+
+  // ─── Preferences (Profile → Settings) ─────────────────────────────────
+  /** Master switch for push notifications (FCM + Telegram). */
+  @Column({ type: 'boolean', default: true })
+  pushEnabled!: boolean;
+
+  /** Specific channels — granular control. All default ON. */
+  @Column({ type: 'boolean', default: true })
+  notifChat!: boolean;
+
+  @Column({ type: 'boolean', default: true })
+  notifContract!: boolean;
+
+  @Column({ type: 'boolean', default: true })
+  notifPayment!: boolean;
+
+  @Column({ type: 'boolean', default: false })
+  notifMarketing!: boolean;
+
+  /** Quiet hours window — HH:MM strings, e.g. "22:00" and "08:00". Null
+   * means no quiet hours. */
+  @Column({ type: 'varchar', length: 5, nullable: true })
+  quietFrom?: string | null;
+
+  @Column({ type: 'varchar', length: 5, nullable: true })
+  quietTo?: string | null;
+
+  /** UI language preference: 'uz', 'uz-cyr', 'ru', 'en'. */
+  @Column({ type: 'varchar', length: 8, default: 'uz' })
+  locale!: string;
 }
