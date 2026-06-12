@@ -20,6 +20,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(req: any, payload: any) {
+    console.log('--- JWT VALIDATION BOSHLANDI ---');
+  console.log('Payload:', payload);
     const authHeader = req.headers.authorization;
     if (!authHeader) return null;
 
@@ -27,10 +29,12 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     
     // Redis-dan bloklanganini tekshirish
     const isBlacklisted = await this.redis.get(token);
+    console.log('Token Redisda bormi?:', isBlacklisted);
     if (isBlacklisted) {
       // Bu yerda xato qaytarsangiz, foydalanuvchi "Logout" bo'lgan hisoblanadi
       return null; 
     }
+    console.log("Token muvaffaqiyatli o'tdi!")
 
     return { 
       userId: payload.sub, 
