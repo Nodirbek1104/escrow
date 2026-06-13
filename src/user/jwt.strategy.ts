@@ -19,27 +19,34 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     super(options);
   }
 
-  async validate(req: any, payload: any) {
-    console.log('--- JWT VALIDATION BOSHLANDI ---');
-  console.log('Payload:', payload);
-    const authHeader = req.headers.authorization;
-    if (!authHeader) return null;
-
-    const token = authHeader.split(' ')[1];
-    
-    // Redis-dan bloklanganini tekshirish
-    const isBlacklisted = await this.redis.get(token);
-    console.log('Token Redisda bormi?:', isBlacklisted);
-    if (isBlacklisted) {
-      // Bu yerda xato qaytarsangiz, foydalanuvchi "Logout" bo'lgan hisoblanadi
-      return null; 
-    }
-    console.log("Token muvaffaqiyatli o'tdi!")
-
-    return { 
-      userId: payload.sub, 
-      phone: payload.phoneNumber,
-      role: payload.role 
-    };
+async validate(req: any, payload: any) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    console.error('[JWT] Authorization header yo\'q!');
+    return null;
   }
+
+  const token = authHeader.split(' ')[1];
+  if (!token) {
+    console.error('[JWT] Token bo\'sh!');
+    return null;
+  }
+
+  try {
+    const isBlacklisted = await this.redis.get(token);
+    if (isBlacklisted) {
+      console.error('[JWT] Token blacklistda!');
+      return null;
+    }
+  } catch (redisError) {
+    // ⚠️ Redis xato bo'lsa — tokeni bloklama, o'tkazib yubor!
+    console.error('[JWT] Redis xatosi, o\'tkazib yuborildi:', redisError);
+  }
+
+  return {
+    userId: payload.sub,
+    phone: payload.phoneNumber,
+    role: payload.role
+  };
+}
 }

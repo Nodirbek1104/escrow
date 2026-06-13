@@ -17,8 +17,8 @@ dotenv.config();
 @Module({
   imports: [
     TypeOrmModule.forFeature([User, UserDevice]),
-    JwtModule.register({
-      secret: process.env.JWT_SECRET,
+      JwtModule.register({
+      secret: process.env.JWT_SECRET || 'Sizning_Maxfiy_Kalitingiz',
       signOptions: { expiresIn: '1d' },
     }),
     AuthModule,
@@ -26,7 +26,7 @@ dotenv.config();
     AuditLogModule
   ],
   controllers: [UserController, AdminController],
-  providers: [UserService, SuperAdminSeed, JwtStrategy], // ← JwtStrategy olib tashlandi
+  providers: [UserService, SuperAdminSeed, JwtStrategy], 
   exports: [UserService, TypeOrmModule],
 })
 export class UserModule {}
